@@ -517,8 +517,11 @@ export function AIResponseRenderer({
 }: AIResponseRendererProps) {
   const router = useRouter()
 
-  // Multi-tier parser handling all cases safely
-  const parsed = normalizeAIResponse(response, structuredPayload)
+  // Memoized normalizer: parses structured response only when response or payload identity changes
+  const parsed = React.useMemo(
+    () => normalizeAIResponse(response, structuredPayload),
+    [response, structuredPayload]
+  )
   const effectiveCalculation = calculationBreakdown || parsed.calculation_breakdown
 
   const handleAction = (url: string) => {

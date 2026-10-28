@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   AlertCircle,
@@ -155,10 +155,13 @@ export function InsightsView() {
     }
   }, [isAuth, token])
 
+  const hasLoadedRef = useRef(false)
   useEffect(() => {
-    if (isAuth) {
+    if (isAuth && !hasLoadedRef.current) {
+      hasLoadedRef.current = true
       fetchInsightsReport()
-    } else {
+    } else if (!isAuth) {
+      hasLoadedRef.current = false
       setIsInitialLoading(false)
       setReport(null)
     }
@@ -192,12 +195,16 @@ export function InsightsView() {
     }
   }
 
-  // Prepare chart data for horizontal visual comparison
-  const chartData = (report?.categories || []).map((cat) => ({
-    name: cat.name,
-    emissions_kg: cat.emissions_kg,
-    status: cat.status,
-  }))
+  // Memoize chart data to avoid recalculation on unrelated re-renders
+  const chartData = useMemo(
+    () =>
+      (report?.categories || []).map((cat) => ({
+        name: cat.name,
+        emissions_kg: cat.emissions_kg,
+        status: cat.status,
+      })),
+    [report?.categories]
+  )
 
   return (
     <div className="space-y-6">

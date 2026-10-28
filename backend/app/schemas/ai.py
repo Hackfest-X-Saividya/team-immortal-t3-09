@@ -91,3 +91,4 @@ class AiChatResponse(BaseModel):
     suggested_follow_ups: List[str] = Field(default_factory=list)
     structured_report: Optional[Dict[str, Any]] = None
     structured_payload: Optional[StructuredAiPayload] = None
+    meta: Optional[Dict[str, Any]] = None

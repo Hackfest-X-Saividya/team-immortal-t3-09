@@ -1,6 +1,9 @@
+import asyncio
 import json
 import logging
 import re
+import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from fastapi import HTTPException, status
 
@@ -42,6 +45,53 @@ from app.utils.dates import utc_iso
 from app.utils.ids import generate_id
 
 logger = logging.getLogger("carboniq.ai")
+
+
+class AiCache:
+    """
+    Workspace-scoped, data-versioned in-memory LRU cache for deterministic calculations
+    and AI responses.
+    Guarantees:
+    - Zero data leakage across workspaces (workspace_id prefix).
+    - Automatic invalidation when underlying workspace records change (count, sum, or period).
+    - Never caches error states.
+    - LRU eviction (max 150 items) with a 10-minute TTL.
+    """
+    _cache: "OrderedDict[str, tuple[AiChatResponse, float]]" = OrderedDict()
+    _max_entries: int = 150
+    _ttl_seconds: float = 600.0
+
+    @classmethod
+    def make_key(cls, workspace_id: str, module: str, question: str, data_fingerprint: str) -> str:
+        norm_q = question.strip().lower()
+        return f"{workspace_id}:{module}:{norm_q}:{data_fingerprint}"
+
+    @classmethod
+    def get(cls, key: str) -> Optional[AiChatResponse]:
+        now = time.time()
+        entry = cls._cache.get(key)
+        if entry is None:
+            return None
+        cached_resp, expiry = entry
+        if now > expiry:
+            cls._cache.pop(key, None)
+            return None
+        cls._cache.move_to_end(key)
+        # Return a copy with fresh timestamp/id if needed, but preserved content
+        return cached_resp
+
+    @classmethod
+    def set(cls, key: str, response: AiChatResponse) -> None:
+        now = time.time()
+        if len(cls._cache) >= cls._max_entries:
+            cls._cache.popitem(last=False)
+        cls._cache[key] = (response, now + cls._ttl_seconds)
+
+    @classmethod
+    def invalidate_workspace(cls, workspace_id: str) -> None:
+        keys_to_remove = [k for k in cls._cache if k.startswith(f"{workspace_id}:")]
+        for k in keys_to_remove:
+            cls._cache.pop(k, None)
 
 
 def sanitize_user_input(text: str) -> str:
@@ -223,8 +273,11 @@ class AiAssistantService:
     - Input sanitization against instruction overriding.
     """
 
-    @staticmethod
-    def _verify_groq_configured() -> str:
+    _groq_client: Optional[Any] = None
+    _cached_api_key: Optional[str] = None
+
+    @classmethod
+    def _verify_groq_configured(cls) -> str:
         """
         Enforces that GROQ_API_KEY is present in the environment.
         Raises HTTP 503 immediately if unconfigured.
@@ -237,18 +290,31 @@ class AiAssistantService:
             )
         return api_key
 
-    @staticmethod
+    @classmethod
+    def _get_groq_client(cls, api_key: str) -> Any:
+        """
+        Reuses a single AsyncGroq client instance across requests to maintain
+        connection pooling and avoid TCP/TLS handshake latency on every call.
+        """
+        if cls._groq_client is None or cls._cached_api_key != api_key:
+            cls._cached_api_key = api_key
+            cls._groq_client = AsyncGroq(api_key=api_key, timeout=12.0)
+        return cls._groq_client
+
+    @classmethod
     async def _call_llm(
+        cls,
         system_instruction: str,
         user_query: str,
         grounded_context: Dict[str, Any],
+        max_tokens: int = 450,
     ) -> str:
         """
-        Calls official Groq API using AsyncGroq client.
+        Calls official Groq API using shared AsyncGroq client.
         Injects verified backend calculations as the sole authoritative numerical context.
-        Raises HTTP 502/429/503 on upstream failures with zero fabricated fallback text.
+        Uses compact JSON formatting and tuned token limits to minimize latency.
         """
-        api_key = AiAssistantService._verify_groq_configured()
+        api_key = cls._verify_groq_configured()
 
         if AsyncGroq is None:
             raise HTTPException(
@@ -257,7 +323,6 @@ class AiAssistantService:
             )
 
         configured_model = settings.effective_groq_model or "qwen/qwen3.8-27b"
-        # Ordered list of models to attempt if configured model is decommissioned or not found
         models_to_attempt = [configured_model]
         for fallback in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
             if fallback not in models_to_attempt:
@@ -266,20 +331,21 @@ class AiAssistantService:
         system_prompt = (
             f"{system_instruction}\n\n"
             "CRITICAL ARCHITECTURAL CONSTRAINTS:\n"
-            "1. You must ONLY use the numerical data, emission factors, and calculations provided in the GROUNDED CONTEXT below.\n"
-            "2. Do NOT invent, extrapolate, or alter emission factors, quantities, percentages, or cost figures.\n"
-            "3. If requested data is missing from the context, state clearly that insufficient records exist in the workspace.\n"
-            "4. Strictly distinguish between measured historical records, modeled ML forecasts, and hypothetical savings scenarios.\n"
-            "5. Respond ONLY with a valid JSON object matching the requested schema. Do NOT enclose in markdown fences (```) or include conversational filler."
+            "1. ONLY use verified numerical data provided in GROUNDED CONTEXT.\n"
+            "2. Do NOT invent, extrapolate, or alter numbers or emission factors.\n"
+            "3. State data limitations if records are missing.\n"
+            "4. Be concise and direct. Keep direct_answer to 2-3 high-impact sentences. Limit key_findings to max 2 items and recommendations to max 2 actions.\n"
+            "5. Respond ONLY with a valid JSON object matching the requested schema without markdown fences."
         )
 
+        # Minified JSON context to save prompt token bandwidth and processing time
+        compact_context = json.dumps(grounded_context, separators=(",", ":"))
         user_prompt = (
-            f"GROUNDED CONTEXT (Authoritative Backend Data):\n"
-            f"{json.dumps(grounded_context, indent=2)}\n\n"
+            f"GROUNDED CONTEXT:\n{compact_context}\n\n"
             f"USER INQUIRY:\n{user_query}"
         )
 
-        client = AsyncGroq(api_key=api_key, timeout=15.0)
+        client = cls._get_groq_client(api_key)
 
         for attempt_idx, current_model in enumerate(models_to_attempt):
             try:
@@ -290,7 +356,7 @@ class AiAssistantService:
                     ],
                     model=current_model,
                     temperature=0.1,  # Low temperature to prevent hallucinations
-                    max_tokens=800,
+                    max_tokens=max_tokens,
                 )
                 if chat_completion.choices and len(chat_completion.choices) > 0:
                     answer = chat_completion.choices[0].message.content
@@ -387,21 +453,37 @@ class AiAssistantService:
     # =========================================================================
     # EXPERIENCE 1: Electricity AI Advisor
     # =========================================================================
-    @staticmethod
+    @classmethod
     async def query_electricity_advisor(
+        cls,
         question: str,
         workspace_id: str,
         db: Any,
     ) -> AiChatResponse:
-        AiAssistantService._verify_groq_configured()
+        t_start = time.perf_counter()
+        cls._verify_groq_configured()
         sanitized_q = sanitize_user_input(question)
         q = sanitized_q.lower()
         timestamp = utc_iso()
         chat_id = generate_id("ai_elec")
 
-        # Load workspace electricity records
-        cursor = db.electricity_records.find({"workspace_id": workspace_id}).sort("reporting_month", 1)
+        # Selective field projection avoids retrieving unnecessary document fields
+        t_db_start = time.perf_counter()
+        projection = {
+            "reporting_month": 1,
+            "consumption_kwh": 1,
+            "calculated_emissions_kg": 1,
+            "bill_amount_inr": 1,
+            "source": 1,
+            "building_or_department": 1,
+            "_id": 0,
+        }
+        cursor = db.electricity_records.find(
+            {"workspace_id": workspace_id},
+            projection=projection,
+        ).sort("reporting_month", 1)
         records = [r async for r in cursor]
+        t_db = (time.perf_counter() - t_db_start) * 1000
 
         if not records:
             empty_msg = "No electricity consumption records found in your workspace yet. Please log monthly meter readings to enable personalized AI energy analysis."
@@ -421,6 +503,17 @@ class AiAssistantService:
 
         total_kwh = sum(r.get("consumption_kwh", 0.0) for r in records)
         total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in records)
+
+        # Scoped Cache Check
+        fingerprint = f"{len(records)}:{total_kwh:.1f}:{latest.get('reporting_month')}"
+        cache_key = AiCache.make_key(workspace_id, "electricity", sanitized_q, fingerprint)
+        cached_resp = AiCache.get(cache_key)
+        if cached_resp:
+            t_total = (time.perf_counter() - t_start) * 1000
+            logger.info("AI [electricity] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            return cached_resp
+
+        t_calc_start = time.perf_counter()
         grid_factor = EMISSION_FACTORS["grid_in_cea_baseline"]
 
         # Department breakdown
@@ -475,39 +568,7 @@ class AiAssistantService:
             },
         }
 
-        # Call official Groq LLM grounded strictly in workspace data
-        elec_instruction = (
-            "You are CarbonIQ's Senior Energy & Decarbonization Analyst.\n"
-            "ROLE: Provide rigorous, grounded analysis of workspace electricity consumption (kWh), CEA baseline emissions (kg CO2e), tariff costs (INR), and energy-efficiency actions.\n"
-            "USER INTENT & EVIDENCE RULES:\n"
-            "- Determine user intent: 'direct' (factual consumption/billing query), 'comparative' (comparing months/departments), 'recommendation' (saving opportunities), or 'analytical'.\n"
-            "- If user asks a simple factual question, answer directly in 'direct_answer' with verified metrics in 'metrics'. Do NOT generate generic filler findings or unrequested recommendations.\n"
-            "- If user asks for savings or reduction, cite realistic operational actions (e.g. HVAC scheduling, cooling set points, solar PV) supported by the data.\n"
-            "- If historical records are limited, honestly state limitations in 'data_limitations'.\n\n"
-            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
-            "{\n"
-            '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
-            '  "direct_answer": "Direct answer citing verified kWh and kg CO2e.",\n'
-            '  "explanation": "Optional supporting methodology note (or null)",\n'
-            '  "metrics": [\n'
-            '    {"label": "Metric Name", "value": "1240", "unit": "kWh", "subtext": "Period"}\n'
-            '  ],\n'
-            '  "key_findings": [\n'
-            '    {"title": "Finding Title", "description": "Concise analytical observation supported by actual records.", "category": "Electricity"}\n'
-            '  ],\n'
-            '  "recommendations": [\n'
-            '    {"title": "Action Title", "explanation": "Why relevant and what supports it.", "priority": "High" | "Medium" | "Low", "expected_benefit": "Realistic benefit", "action_url": "/dashboard/simulator"}\n'
-            '  ],\n'
-            '  "data_limitations": ["Data boundary note if records are few"]\n'
-            "}"
-        )
-        llm_reply = await AiAssistantService._call_llm(
-            system_instruction=elec_instruction,
-            user_query=sanitized_q,
-            grounded_context=grounded_context,
-        )
-
-        # Attach verifiable calculation breakdown if applicable
+        # Deterministic calculation breakdown if requested
         calculation_breakdown = None
         match_pct = re.search(r"(\d+)%", q)
         if "save" in q or "reduc" in q or match_pct:
@@ -546,42 +607,121 @@ class AiAssistantService:
                 },
                 result=f"{direction.capitalize()} by {abs(diff_kwh)} kWh ({pct_change:+0.1f}%)",
             )
+        t_calc = (time.perf_counter() - t_calc_start) * 1000
 
+        elec_instruction = (
+            "You are CarbonIQ's Senior Energy & Decarbonization Analyst.\n"
+            "ROLE: Provide grounded analysis of workspace electricity (kWh), CEA emissions (kg CO2e), tariff costs (INR), and efficiency actions.\n"
+            "USER INTENT & EVIDENCE RULES:\n"
+            "- Determine user intent: 'direct', 'comparative', 'recommendation', or 'analytical'.\n"
+            "- If user asks a factual question, answer directly in 'direct_answer' with verified metrics in 'metrics'. Keep it concise without filler.\n"
+            "- If user asks for savings, cite realistic operational actions (HVAC scheduling, cooling set points, solar PV).\n"
+            "- If records are limited, state limitations in 'data_limitations'.\n\n"
+            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
+            "{\n"
+            '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
+            '  "direct_answer": "Direct answer citing verified kWh and kg CO2e.",\n'
+            '  "explanation": "Optional methodology note (or null)",\n'
+            '  "metrics": [\n'
+            '    {"label": "Metric Name", "value": "1240", "unit": "kWh", "subtext": "Period"}\n'
+            '  ],\n'
+            '  "key_findings": [\n'
+            '    {"title": "Finding Title", "description": "Concise observation.", "category": "Electricity"}\n'
+            '  ],\n'
+            '  "recommendations": [\n'
+            '    {"title": "Action Title", "explanation": "Why relevant.", "priority": "High" | "Medium" | "Low", "expected_benefit": "Realistic benefit", "action_url": "/dashboard/simulator"}\n'
+            '  ],\n'
+            '  "data_limitations": ["Data boundary note if records are few"]\n'
+            "}"
+        )
+
+        t_llm_start = time.perf_counter()
+        llm_reply = await cls._call_llm(
+            system_instruction=elec_instruction,
+            user_query=sanitized_q,
+            grounded_context=grounded_context,
+            max_tokens=450,
+        )
+        t_llm = (time.perf_counter() - t_llm_start) * 1000
+
+        t_parse_start = time.perf_counter()
         structured_payload = parse_structured_ai_reply(
             llm_reply,
             default_intent="direct",
             default_answer=f"Latest electricity consumption was {latest['consumption_kwh']:,} kWh ({latest.get('calculated_emissions_kg', 0):,.1f} kg CO2e) for {latest['reporting_month']}.",
         )
+        t_parse = (time.perf_counter() - t_parse_start) * 1000
 
-        return AiChatResponse(
+        t_total = (time.perf_counter() - t_start) * 1000
+        logger.info(
+            "AI [electricity] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_db, t_calc, t_llm, t_parse
+        )
+
+        response = AiChatResponse(
             id=chat_id,
             content=structured_payload.direct_answer,
             timestamp=timestamp,
             calculation_breakdown=calculation_breakdown,
             structured_payload=structured_payload,
+            meta={
+                "timing_ms": {
+                    "db": round(t_db, 1),
+                    "calc": round(t_calc, 1),
+                    "llm": round(t_llm, 1),
+                    "parse": round(t_parse, 1),
+                    "total": round(t_total, 1),
+                },
+                "cached": False,
+            },
         )
+        AiCache.set(cache_key, response)
+        return response
 
     # =========================================================================
     # EXPERIENCE 2: Transportation AI Advisor
     # =========================================================================
-    @staticmethod
+    @classmethod
     async def query_transportation_advisor(
+        cls,
         question: str,
         workspace_id: str,
         db: Any,
     ) -> AiChatResponse:
-        AiAssistantService._verify_groq_configured()
+        t_start = time.perf_counter()
+        cls._verify_groq_configured()
         sanitized_q = sanitize_user_input(question)
         q = sanitized_q.lower()
         timestamp = utc_iso()
         chat_id = generate_id("ai_trans")
 
-        # Load bus routes and transportation logs
-        routes_cursor = db.bus_routes.find({"workspace_id": workspace_id})
-        routes = [r async for r in routes_cursor]
+        # Concurrently fetch bus routes and transportation records with lean projections
+        t_db_start = time.perf_counter()
+        routes_proj = {
+            "route_name": 1,
+            "distance_km": 1,
+            "assigned_students": 1,
+            "seating_capacity": 1,
+            "destination": 1,
+            "trips_per_day": 1,
+            "fuel_efficiency_km_per_l": 1,
+            "_id": 0,
+        }
+        trans_proj = {
+            "distance_km": 1,
+            "calculated_emissions_kg": 1,
+            "date": 1,
+            "_id": 0,
+        }
 
-        trans_cursor = db.transportation_records.find({"workspace_id": workspace_id})
-        trans_records = [t async for t in trans_cursor]
+        async def _fetch_routes():
+            return [r async for r in db.bus_routes.find({"workspace_id": workspace_id}, projection=routes_proj)]
+
+        async def _fetch_trans():
+            return [t async for t in db.transportation_records.find({"workspace_id": workspace_id}, projection=trans_proj)]
+
+        routes, trans_records = await asyncio.gather(_fetch_routes(), _fetch_trans())
+        t_db = (time.perf_counter() - t_db_start) * 1000
 
         if not routes and not trans_records:
             empty_msg = "No transportation records or fleet routes found in your workspace yet. Please configure bus corridors or log trip mileage to enable mobility analysis."
@@ -599,6 +739,16 @@ class AiAssistantService:
         total_dist = sum(r.get("distance_km", 0.0) for r in trans_records)
         total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in trans_records)
 
+        # Scoped Cache Check
+        fingerprint = f"{len(routes)}:{len(trans_records)}:{total_dist:.1f}:{total_emissions:.1f}"
+        cache_key = AiCache.make_key(workspace_id, "transportation", sanitized_q, fingerprint)
+        cached_resp = AiCache.get(cache_key)
+        if cached_resp:
+            t_total = (time.perf_counter() - t_start) * 1000
+            logger.info("AI [transportation] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            return cached_resp
+
+        t_calc_start = time.perf_counter()
         # Evaluate route optimization
         proposals = optimize_bus_routes(routes) if routes else []
 
@@ -636,38 +786,6 @@ class AiAssistantService:
             ],
         }
 
-        trans_instruction = (
-            "You are CarbonIQ's Fleet & Mobility Sustainability Advisor.\n"
-            "ROLE: Provide rigorous, grounded insights on bus routes, trip distances, student occupancy, diesel consumption, and Scope 1 tailpipe emissions.\n"
-            "USER INTENT & EVIDENCE RULES:\n"
-            "- Determine user intent: 'direct' (fuel/distance inquiry), 'comparative' (comparing routes/occupancy), 'recommendation' (route consolidation/savings), or 'analytical'.\n"
-            "- Use ONLY active bus routes, trip distances, and fleet records in GROUNDED CONTEXT.\n"
-            "- If user asks which route consumes the most fuel, name the route and cite its distance, trips, and L/day directly in 'direct_answer'.\n"
-            "- Do NOT claim a route is inefficient merely because it has high total emissions without considering distance and passenger volume.\n"
-            "- Do NOT invent routes, vehicle models, or unlogged trips.\n\n"
-            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
-            "{\n"
-            '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
-            '  "direct_answer": "Concise direct answer citing verified distance, fuel (L), or emissions.",\n'
-            '  "explanation": "Optional supporting explanation (or null)",\n'
-            '  "metrics": [\n'
-            '    {"label": "Daily Fuel", "value": "26.7", "unit": "L/day", "subtext": "Peak route"}\n'
-            '  ],\n'
-            '  "key_findings": [\n'
-            '    {"title": "Route Finding", "description": "Concise route observation supported by records.", "category": "Transportation"}\n'
-            '  ],\n'
-            '  "recommendations": [\n'
-            '    {"title": "Action Title", "explanation": "Corridor consolidation or deadhead reduction.", "priority": "Medium", "expected_benefit": "Estimated fuel reduction", "action_url": "/dashboard/transportation"}\n'
-            '  ],\n'
-            '  "data_limitations": ["Data boundary note if records are few"]\n'
-            "}"
-        )
-        llm_reply = await AiAssistantService._call_llm(
-            system_instruction=trans_instruction,
-            user_query=sanitized_q,
-            grounded_context=grounded_trans_context,
-        )
-
         calculation_breakdown = None
         if ("combin" in q or "optimiz" in q or "overlap" in q) and proposals:
             p = proposals[0]
@@ -692,38 +810,106 @@ class AiAssistantService:
                 },
                 result=f"{daily_fuel} L/day",
             )
+        t_calc = (time.perf_counter() - t_calc_start) * 1000
 
+        trans_instruction = (
+            "You are CarbonIQ's Fleet & Mobility Sustainability Advisor.\n"
+            "ROLE: Provide grounded insights on bus routes, trip distances, student occupancy, diesel consumption, and Scope 1 tailpipe emissions.\n"
+            "USER INTENT & EVIDENCE RULES:\n"
+            "- Determine user intent: 'direct', 'comparative', 'recommendation', or 'analytical'.\n"
+            "- Use ONLY active bus routes, trip distances, and fleet records in GROUNDED CONTEXT.\n"
+            "- If user asks which route consumes the most fuel, name the route and cite its distance, trips, and L/day directly in 'direct_answer'.\n"
+            "- Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items.\n\n"
+            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
+            "{\n"
+            '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
+            '  "direct_answer": "Concise direct answer citing verified distance, fuel (L), or emissions.",\n'
+            '  "explanation": "Optional supporting explanation (or null)",\n'
+            '  "metrics": [\n'
+            '    {"label": "Daily Fuel", "value": "26.7", "unit": "L/day", "subtext": "Peak route"}\n'
+            '  ],\n'
+            '  "key_findings": [\n'
+            '    {"title": "Route Finding", "description": "Concise route observation supported by records.", "category": "Transportation"}\n'
+            '  ],\n'
+            '  "recommendations": [\n'
+            '    {"title": "Action Title", "explanation": "Corridor consolidation or deadhead reduction.", "priority": "Medium", "expected_benefit": "Estimated fuel reduction", "action_url": "/dashboard/transportation"}\n'
+            '  ],\n'
+            '  "data_limitations": ["Data boundary note if records are few"]\n'
+            "}"
+        )
+
+        t_llm_start = time.perf_counter()
+        llm_reply = await cls._call_llm(
+            system_instruction=trans_instruction,
+            user_query=sanitized_q,
+            grounded_context=grounded_trans_context,
+            max_tokens=450,
+        )
+        t_llm = (time.perf_counter() - t_llm_start) * 1000
+
+        t_parse_start = time.perf_counter()
         structured_payload = parse_structured_ai_reply(
             llm_reply,
             default_intent="direct",
             default_answer="Transportation analysis generated based on active fleet routes.",
         )
+        t_parse = (time.perf_counter() - t_parse_start) * 1000
 
-        return AiChatResponse(
+        t_total = (time.perf_counter() - t_start) * 1000
+        logger.info(
+            "AI [transportation] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_db, t_calc, t_llm, t_parse
+        )
+
+        response = AiChatResponse(
             id=chat_id,
             content=structured_payload.direct_answer,
             timestamp=timestamp,
             calculation_breakdown=calculation_breakdown,
             structured_payload=structured_payload,
+            meta={
+                "timing_ms": {
+                    "db": round(t_db, 1),
+                    "calc": round(t_calc, 1),
+                    "llm": round(t_llm, 1),
+                    "parse": round(t_parse, 1),
+                    "total": round(t_total, 1),
+                },
+                "cached": False,
+            },
         )
+        AiCache.set(cache_key, response)
+        return response
 
     # =========================================================================
     # EXPERIENCE 3: Waste AI Advisor
     # =========================================================================
-    @staticmethod
+    @classmethod
     async def query_waste_advisor(
+        cls,
         question: str,
         workspace_id: str,
         db: Any,
     ) -> AiChatResponse:
-        AiAssistantService._verify_groq_configured()
+        t_start = time.perf_counter()
+        cls._verify_groq_configured()
         sanitized_q = sanitize_user_input(question)
         q = sanitized_q.lower()
         timestamp = utc_iso()
         chat_id = generate_id("ai_waste")
 
-        cursor = db.waste_records.find({"workspace_id": workspace_id})
+        t_db_start = time.perf_counter()
+        waste_proj = {
+            "quantity_kg": 1,
+            "treatment_method": 1,
+            "category": 1,
+            "date": 1,
+            "calculated_emissions_kg": 1,
+            "_id": 0,
+        }
+        cursor = db.waste_records.find({"workspace_id": workspace_id}, projection=waste_proj)
         records = [r async for r in cursor]
+        t_db = (time.perf_counter() - t_db_start) * 1000
 
         if not records:
             empty_msg = "No waste stream records found in your workspace yet. Please log waste generation categories and treatment methods to enable circularity analysis."
@@ -746,6 +932,16 @@ class AiAssistantService:
         )
         rate = calculate_recycling_rate(recycled_kg, total_kg)
 
+        # Scoped Cache Check
+        fingerprint = f"{len(records)}:{total_kg:.1f}:{recycled_kg:.1f}"
+        cache_key = AiCache.make_key(workspace_id, "waste", sanitized_q, fingerprint)
+        cached_resp = AiCache.get(cache_key)
+        if cached_resp:
+            t_total = (time.perf_counter() - t_start) * 1000
+            logger.info("AI [waste] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            return cached_resp
+
+        t_calc_start = time.perf_counter()
         cat_totals: Dict[str, float] = {}
         for r in records:
             c = r.get("category") or "General"
@@ -759,38 +955,6 @@ class AiAssistantService:
             "recycling_rate_percent": round(rate or 0, 1),
             "categories": cat_totals,
         }
-
-        waste_instruction = (
-            "You are CarbonIQ's Circular Economy & Waste Diversion Advisor.\n"
-            "ROLE: Provide rigorous analysis of waste stream weights (kg), recovery/recycling diversion rates (%), and IPCC avoidance factors.\n"
-            "USER INTENT & EVIDENCE RULES:\n"
-            "- Determine user intent: 'direct' (waste generation, recycling rate), 'comparative' (stream categories), 'recommendation' (diversion actions), or 'analytical'.\n"
-            "- STRICT NUMERICAL INTEGRITY: Distinguish positive landfill emissions from negative circular diversion credits (avoided landfill methane).\n"
-            "- NEVER describe negative emissions as verified carbon removal. It is an avoided emission credit under IPCC circular accounting.\n"
-            "- If user asks about the recycling rate, cite the exact rate and total kg directly in 'direct_answer'.\n"
-            "- Do NOT invent waste streams or unlogged weights.\n\n"
-            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
-            "{\n"
-            '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
-            '  "direct_answer": "Direct answer citing verified kg, %, or diversion offsets.",\n'
-            '  "explanation": "Methodology context distinguishing circular credits from removal (or null)",\n'
-            '  "metrics": [\n'
-            '    {"label": "Recycling Rate", "value": "42.0", "unit": "%", "subtext": "Material diversion"}\n'
-            '  ],\n'
-            '  "key_findings": [\n'
-            '    {"title": "Diversion Finding", "description": "Stream observation.", "category": "Waste"}\n'
-            '  ],\n'
-            '  "recommendations": [\n'
-            '    {"title": "Action Title", "explanation": "Practical segregation or composting action.", "priority": "Medium", "expected_benefit": "Avoided landfill waste", "action_url": "/dashboard/waste"}\n'
-            '  ],\n'
-            '  "data_limitations": ["Data boundary note if records are few"]\n'
-            "}"
-        )
-        llm_reply = await AiAssistantService._call_llm(
-            system_instruction=waste_instruction,
-            user_query=sanitized_q,
-            grounded_context=grounded_waste_context,
-        )
 
         calculation_breakdown = None
         if "recycl" in q:
@@ -809,40 +973,121 @@ class AiAssistantService:
                 inputs={c: f"{k:,.0f} kg" for c, k in cat_totals.items()},
                 result=f"{top_cat} ({top_qty:,.0f} kg)",
             )
+        t_calc = (time.perf_counter() - t_calc_start) * 1000
 
+        waste_instruction = (
+            "You are CarbonIQ's Circular Economy & Waste Diversion Advisor.\n"
+            "ROLE: Provide grounded analysis of waste stream weights (kg), recovery/recycling diversion rates (%), and IPCC avoidance factors.\n"
+            "USER INTENT & EVIDENCE RULES:\n"
+            "- Determine user intent: 'direct', 'comparative', 'recommendation', or 'analytical'.\n"
+            "- Distinguish landfill emissions from negative circular diversion credits (avoided methane).\n"
+            "- Never describe negative emissions as verified carbon removal (it is an avoided emission credit).\n"
+            "- Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items.\n\n"
+            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
+            "{\n"
+            '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
+            '  "direct_answer": "Direct answer citing verified kg, %, or diversion offsets.",\n'
+            '  "explanation": "Methodology context distinguishing circular credits from removal (or null)",\n'
+            '  "metrics": [\n'
+            '    {"label": "Recycling Rate", "value": "42.0", "unit": "%", "subtext": "Material diversion"}\n'
+            '  ],\n'
+            '  "key_findings": [\n'
+            '    {"title": "Diversion Finding", "description": "Stream observation.", "category": "Waste"}\n'
+            '  ],\n'
+            '  "recommendations": [\n'
+            '    {"title": "Action Title", "explanation": "Practical segregation or composting action.", "priority": "Medium", "expected_benefit": "Avoided landfill waste", "action_url": "/dashboard/waste"}\n'
+            '  ],\n'
+            '  "data_limitations": ["Data boundary note if records are few"]\n'
+            "}"
+        )
+
+        t_llm_start = time.perf_counter()
+        llm_reply = await cls._call_llm(
+            system_instruction=waste_instruction,
+            user_query=sanitized_q,
+            grounded_context=grounded_waste_context,
+            max_tokens=450,
+        )
+        t_llm = (time.perf_counter() - t_llm_start) * 1000
+
+        t_parse_start = time.perf_counter()
         structured_payload = parse_structured_ai_reply(
             llm_reply,
             default_intent="direct",
             default_answer=f"Recorded waste total is {total_kg:,.0f} kg with a {rate or 0:.1f}% recycling recovery rate.",
         )
+        t_parse = (time.perf_counter() - t_parse_start) * 1000
 
-        return AiChatResponse(
+        t_total = (time.perf_counter() - t_start) * 1000
+        logger.info(
+            "AI [waste] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_db, t_calc, t_llm, t_parse
+        )
+
+        response = AiChatResponse(
             id=chat_id,
             content=structured_payload.direct_answer,
             timestamp=timestamp,
             calculation_breakdown=calculation_breakdown,
             structured_payload=structured_payload,
+            meta={
+                "timing_ms": {
+                    "db": round(t_db, 1),
+                    "calc": round(t_calc, 1),
+                    "llm": round(t_llm, 1),
+                    "parse": round(t_parse, 1),
+                    "total": round(t_total, 1),
+                },
+                "cached": False,
+            },
         )
+        AiCache.set(cache_key, response)
+        return response
 
     # =========================================================================
     # EXPERIENCE 4: Main AI Insights Assistant (Enterprise Sustainability Synthesis)
     # =========================================================================
-    @staticmethod
+    @classmethod
     async def query_insights_advisor(
+        cls,
         question: str,
         workspace_id: str,
         db: Any,
     ) -> AiChatResponse:
-        AiAssistantService._verify_groq_configured()
+        t_start = time.perf_counter()
+        cls._verify_groq_configured()
         sanitized_q = sanitize_user_input(question)
         timestamp = utc_iso()
         chat_id = generate_id("ai_ins")
 
-        # 1. Gather cross-category records for the workspace
-        elec_records = [r async for r in db.electricity_records.find({"workspace_id": workspace_id})]
-        trans_records = [r async for r in db.transportation_records.find({"workspace_id": workspace_id})]
-        waste_records = [r async for r in db.waste_records.find({"workspace_id": workspace_id})]
-        bus_routes = [r async for r in db.bus_routes.find({"workspace_id": workspace_id})]
+        # 1. Gather cross-category records concurrently using lean field projections
+        t_db_start = time.perf_counter()
+        elec_proj = {"calculated_emissions_kg": 1, "reporting_month": 1, "_id": 0}
+        trans_proj = {"calculated_emissions_kg": 1, "date": 1, "_id": 0}
+        waste_proj = {"calculated_emissions_kg": 1, "date": 1, "_id": 0}
+
+        async def _get_elec():
+            return [r async for r in db.electricity_records.find({"workspace_id": workspace_id}, projection=elec_proj)]
+
+        async def _get_trans():
+            return [r async for r in db.transportation_records.find({"workspace_id": workspace_id}, projection=trans_proj)]
+
+        async def _get_waste():
+            return [r async for r in db.waste_records.find({"workspace_id": workspace_id}, projection=waste_proj)]
+
+        async def _get_routes_count():
+            try:
+                return await db.bus_routes.count_documents({"workspace_id": workspace_id})
+            except Exception:
+                return 0
+
+        elec_records, trans_records, waste_records, bus_routes_count = await asyncio.gather(
+            _get_elec(),
+            _get_trans(),
+            _get_waste(),
+            _get_routes_count(),
+        )
+        t_db = (time.perf_counter() - t_db_start) * 1000
 
         if not elec_records and not trans_records and not waste_records:
             empty_msg = "No emissions records found across Electricity, Transportation, or Waste in your workspace yet. Please add activity records to enable cross-category portfolio insights."
@@ -858,12 +1103,22 @@ class AiAssistantService:
                 ),
             )
 
-        # 2. Strict deterministic calculations (Python as the authoritative single source of truth)
+        # 2. Strict deterministic calculations (Python as authoritative single source of truth)
+        t_calc_start = time.perf_counter()
         elec_emissions = round(sum(r.get("calculated_emissions_kg", 0.0) for r in elec_records), 1)
         trans_emissions = round(sum(r.get("calculated_emissions_kg", 0.0) for r in trans_records), 1)
         waste_emissions = round(sum(r.get("calculated_emissions_kg", 0.0) for r in waste_records), 1)
 
         total_net_emissions = round(elec_emissions + trans_emissions + waste_emissions, 1)
+
+        # Scoped Cache Check
+        fingerprint = f"{len(elec_records)}:{len(trans_records)}:{len(waste_records)}:{total_net_emissions:.1f}"
+        cache_key = AiCache.make_key(workspace_id, "insights", sanitized_q, fingerprint)
+        cached_resp = AiCache.get(cache_key)
+        if cached_resp:
+            t_total = (time.perf_counter() - t_start) * 1000
+            logger.info("AI [insights] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            return cached_resp
 
         # Compute gross positive emissions for explicit denominator calculations
         positive_categories = []
@@ -961,68 +1216,12 @@ class AiAssistantService:
             "reporting_period": reporting_period_str,
             "largest_source": largest_source_info,
             "categories": categories_data,
-            "bus_routes_count": len(bus_routes),
+            "bus_routes_count": bus_routes_count,
             "ml_forecasting": {
                 "is_available": ml_info.is_loaded,
                 "algorithm": ml_info.algorithm,
                 "evaluation_metrics": ml_info.evaluation_metrics,
             },
-        }
-
-        # 4. Prompt Groq for structured narrative insights in strict JSON
-        system_instruction = (
-            "You are CarbonIQ's Principal Enterprise Sustainability Analyst.\n"
-            "ROLE: Provide rigorous, cross-category carbon footprint analysis across Electricity, Transportation, and Waste.\n"
-            "USER INTENT & EVIDENCE RULES:\n"
-            "- Answer the user's specific inquiry FIRST. If the user asks for the largest emission source, answer directly in 'direct_answer' and cite its exact share and emissions in 'metrics'. Do not force an unnecessary full portfolio report.\n"
-            "- If the user requests an overall summary or comprehensive report, provide an executive synthesis in 'direct_answer', category observations in 'key_findings', and prioritized abatement steps in 'recommendations'.\n"
-            "- If the user asks about future emissions predictions or forecasting, explain that CarbonIQ generates forecasts using a pre-trained supervised XGBoost pipeline based on historical workspace operational baselines, with holdout R²=0.976 and MAE=37.5 kg CO2e. Separate model forecasts from LLM explanations: never invent numerical prediction figures.\n"
-            "- STRICT INTEGRITY: Distinguish gross positive emissions from net portfolio emissions (which includes circular diversion credits).\n"
-            "- Ground all numbers in GROUNDED CONTEXT. Do NOT alter values.\n\n"
-            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
-            "{\n"
-            '  "intent": "direct" | "analytical" | "comprehensive",\n'
-            '  "direct_answer": "Direct, concise answer answering the user inquiry immediately with verified figures.",\n'
-            '  "explanation": "Optional supporting portfolio context (or null)",\n'
-            '  "metrics": [\n'
-            '    {"label": "Metric Name", "value": "219.3", "unit": "kg CO2e", "subtext": "Scope note"}\n'
-            '  ],\n'
-            '  "key_findings": [\n'
-            '    {"title": "Finding Title", "description": "Concise observation explaining the driver or methodology.", "category": "Category"}\n'
-            '  ],\n'
-            '  "recommendations": [\n'
-            '    {"title": "Action Title", "explanation": "Actionable explanation.", "expected_benefit": "Qualitative or modeled realistic benefit.", "priority": "High" | "Medium" | "Low", "category": "Category", "action_url": "/dashboard/simulator", "action_label": "Model Savings"}\n'
-            '  ],\n'
-            '  "data_limitations": ["Dataset coverage notes if applicable"]\n'
-            "}"
-        )
-
-        llm_raw_reply = await AiAssistantService._call_llm(
-            system_instruction=system_instruction,
-            user_query=f"Generate sustainability analytics report for query: '{sanitized_q}'",
-            grounded_context=grounded_context,
-        )
-
-        structured_payload = parse_structured_ai_reply(
-            llm_raw_reply,
-            default_intent="direct",
-            default_answer=f"The portfolio recorded a net carbon footprint of {total_net_emissions:,.1f} kg CO2e across active categories.",
-        )
-
-        # Build verified structured report for dashboard analytics view
-        structured_report = {
-            "status": "success",
-            "title": "Carbon Footprint & Sustainability Analysis",
-            "summary": structured_payload.direct_answer,
-            "reporting_period": reporting_period_str,
-            "total_net_emissions_kg": total_net_emissions,
-            "total_gross_emissions_kg": gross_positive_emissions,
-            "total_records_analyzed": len(elec_records) + len(trans_records) + len(waste_records),
-            "largest_source": largest_source_info,
-            "categories": categories_data,
-            "key_findings": [kf.model_dump() for kf in structured_payload.key_findings],
-            "recommendations": [rec.model_dump() for rec in structured_payload.recommendations],
-            "data_limitations": structured_payload.data_limitations,
         }
 
         # Calculation breakdown for transparent numerical audit
@@ -1040,12 +1239,91 @@ class AiAssistantService:
             ],
             result=f"{total_net_emissions:,.1f} kg CO2e Net Portfolio Total",
         )
+        t_calc = (time.perf_counter() - t_calc_start) * 1000
 
-        return AiChatResponse(
+        # 4. Prompt Groq for structured narrative insights in strict JSON
+        system_instruction = (
+            "You are CarbonIQ's Principal Enterprise Sustainability Analyst.\n"
+            "ROLE: Provide grounded, cross-category carbon footprint analysis across Electricity, Transportation, and Waste.\n"
+            "USER INTENT & EVIDENCE RULES:\n"
+            "- Answer the user's specific inquiry FIRST. If the user asks for the largest emission source, answer directly in 'direct_answer' and cite its exact share and emissions in 'metrics'.\n"
+            "- If user requests an overall summary, provide an executive synthesis in 'direct_answer', category observations in 'key_findings', and prioritized abatement steps in 'recommendations'.\n"
+            "- If user asks about future emissions predictions, explain that CarbonIQ forecasts using an XGBoost pipeline (R²=0.976, MAE=37.5 kg CO2e) without inventing prediction values.\n"
+            "- Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items each.\n\n"
+            "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
+            "{\n"
+            '  "intent": "direct" | "analytical" | "comprehensive",\n'
+            '  "direct_answer": "Direct, concise answer answering the user inquiry immediately with verified figures.",\n'
+            '  "explanation": "Optional supporting portfolio context (or null)",\n'
+            '  "metrics": [\n'
+            '    {"label": "Metric Name", "value": "219.3", "unit": "kg CO2e", "subtext": "Scope note"}\n'
+            '  ],\n'
+            '  "key_findings": [\n'
+            '    {"title": "Finding Title", "description": "Concise observation.", "category": "Category"}\n'
+            '  ],\n'
+            '  "recommendations": [\n'
+            '    {"title": "Action Title", "explanation": "Actionable explanation.", "expected_benefit": "Qualitative or modeled realistic benefit.", "priority": "High" | "Medium" | "Low", "category": "Category", "action_url": "/dashboard/simulator", "action_label": "Model Savings"}\n'
+            '  ],\n'
+            '  "data_limitations": ["Dataset coverage notes if applicable"]\n'
+            "}"
+        )
+
+        t_llm_start = time.perf_counter()
+        llm_raw_reply = await cls._call_llm(
+            system_instruction=system_instruction,
+            user_query=f"Generate sustainability analytics report for query: '{sanitized_q}'",
+            grounded_context=grounded_context,
+            max_tokens=650,
+        )
+        t_llm = (time.perf_counter() - t_llm_start) * 1000
+
+        t_parse_start = time.perf_counter()
+        structured_payload = parse_structured_ai_reply(
+            llm_raw_reply,
+            default_intent="direct",
+            default_answer=f"The portfolio recorded a net carbon footprint of {total_net_emissions:,.1f} kg CO2e across active categories.",
+        )
+        t_parse = (time.perf_counter() - t_parse_start) * 1000
+
+        # Build verified structured report for dashboard analytics view
+        structured_report = {
+            "status": "success",
+            "title": "Carbon Footprint & Sustainability Analysis",
+            "summary": structured_payload.direct_answer,
+            "reporting_period": reporting_period_str,
+            "total_net_emissions_kg": total_net_emissions,
+            "total_gross_emissions_kg": gross_positive_emissions,
+            "total_records_analyzed": len(elec_records) + len(trans_records) + len(waste_records),
+            "largest_source": largest_source_info,
+            "categories": categories_data,
+            "key_findings": [kf.model_dump() for kf in structured_payload.key_findings],
+            "recommendations": [rec.model_dump() for rec in structured_payload.recommendations],
+            "data_limitations": structured_payload.data_limitations,
+        }
+
+        t_total = (time.perf_counter() - t_start) * 1000
+        logger.info(
+            "AI [insights] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_db, t_calc, t_llm, t_parse
+        )
+
+        response = AiChatResponse(
             id=chat_id,
             content=structured_payload.direct_answer,
             timestamp=timestamp,
             calculation_breakdown=calculation_breakdown,
             structured_report=structured_report,
             structured_payload=structured_payload,
+            meta={
+                "timing_ms": {
+                    "db": round(t_db, 1),
+                    "calc": round(t_calc, 1),
+                    "llm": round(t_llm, 1),
+                    "parse": round(t_parse, 1),
+                    "total": round(t_total, 1),
+                },
+                "cached": False,
+            },
         )
+        AiCache.set(cache_key, response)
+        return response

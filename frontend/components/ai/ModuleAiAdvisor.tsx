@@ -127,6 +127,21 @@ export function ModuleAiAdvisor({
               {emptyStateDescription ||
                 'Type your question below. The advisor evaluates your active records and applies verified calculation functions to provide grounded insights.'}
             </p>
+            {suggestedQuestions && suggestedQuestions.length > 0 && (
+              <div className="mt-5 flex flex-wrap gap-2 justify-center max-w-xl mx-auto">
+                {suggestedQuestions.map((q, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    disabled={isProcessing}
+                    onClick={() => handleAsk(q)}
+                    className="rounded-full border border-[#D5E4D3] bg-white px-3 py-1.5 text-[11px] font-medium text-[#285943] hover:bg-[#EAF2E7] hover:border-[#285943] transition-colors disabled:opacity-50 cursor-pointer shadow-2xs"
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-4 max-h-[520px] overflow-y-auto pr-1">
