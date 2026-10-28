@@ -34,7 +34,10 @@ class RouteOptimizationProposal(BaseModel):
     status: str = "pending"  # "pending" | "accepted" | "rejected" | "implemented"
 
 
-def optimize_bus_routes(routes_data: List[Dict[str, Any]]) -> List[RouteOptimizationProposal]:
+def optimize_bus_routes(
+    routes_data: List[Dict[str, Any]],
+    is_targeted: bool = False,
+) -> List[RouteOptimizationProposal]:
     """
     Evaluates candidate bus routes for feasible consolidation opportunities.
     Considers student demand, seating capacity constraints, shared corridors,
@@ -74,9 +77,96 @@ def optimize_bus_routes(routes_data: List[Dict[str, Any]]) -> List[RouteOptimiza
             cap_b = int(r_b.get("seating_capacity", 40))
             max_capacity = max(cap_a, cap_b)
 
+            dist_a = float(r_a.get("distance_km", 0.0))
+            dist_b = float(r_b.get("distance_km", 0.0))
+            current_total_dist = dist_a + dist_b
+
+            eff_a = max(1.0, float(r_a.get("fuel_efficiency_km_per_l", 4.5)))
+            eff_b = max(1.0, float(r_b.get("fuel_efficiency_km_per_l", 4.5)))
+            avg_eff = round((eff_a + eff_b) / 2.0, 2)
+
+            trips_a = max(1, int(r_a.get("trips_per_day", 2)))
+            trips_b = max(1, int(r_b.get("trips_per_day", 2)))
+            max_trips = max(trips_a, trips_b)
+
+            current_daily_fuel = round((dist_a * trips_a) / eff_a + (dist_b * trips_b) / eff_b, 1)
+
+            name_a = str(r_a.get("route_name", f"Route {r_a.get('id', 'A')}"))
+            name_b = str(r_b.get("route_name", f"Route {r_b.get('id', 'B')}"))
+            id_a = str(r_a.get("id", "a"))
+            id_b = str(r_b.get("id", "b"))
+
+            buses_a = int(r_a.get("current_buses_count", 1))
+            buses_b = int(r_b.get("current_buses_count", 1))
+
+            current_config = RouteConfigSummary(
+                route_ids=[id_a, id_b],
+                route_names=[name_a, name_b],
+                buses_count=buses_a + buses_b,
+                students_served=total_students,
+                total_distance_km=current_total_dist,
+                daily_fuel_consumption_liters=current_daily_fuel,
+                monthly_fuel_cost_inr=round(current_daily_fuel * operating_days_per_month * diesel_price, 0),
+                monthly_emissions_kg=round(current_daily_fuel * operating_days_per_month * diesel_factor, 1),
+            )
+
             # Constraint: Combined students must not exceed the capacity of a single consolidated vehicle
             capacity_check_passed = total_students <= max_capacity
             if not capacity_check_passed:
+                # Direct single-trip consolidation is infeasible.
+                # If candidate routes were explicitly targeted for optimization and each route
+                # individually fits within vehicle capacity, evaluate staggered schedule optimization.
+                if is_targeted and students_a <= cap_a and students_b <= cap_b:
+                    proposed_config = RouteConfigSummary(
+                        route_ids=[f"{id_a}-{id_b}-staggered"],
+                        route_names=[f"Staggered: {name_a} + {name_b}"],
+                        buses_count=1,
+                        students_served=total_students,
+                        total_distance_km=current_total_dist,
+                        daily_fuel_consumption_liters=current_daily_fuel,
+                        monthly_fuel_cost_inr=round(current_daily_fuel * operating_days_per_month * diesel_price, 0),
+                        monthly_emissions_kg=round(current_daily_fuel * operating_days_per_month * diesel_factor, 1),
+                    )
+
+                    proposal = RouteOptimizationProposal(
+                        id=generate_id("opt"),
+                        title=f"Staggered Schedule Bus Optimization: {name_a} & {name_b}",
+                        summary=(
+                            f"Deploy 1 bus across staggered operating schedules for {name_a} ({students_a} students) "
+                            f"and {name_b} ({students_b} students). Passengers are transported in two sequential trips "
+                            f"without exceeding the {max_capacity}-seat capacity limit on any single trip."
+                        ),
+                        reason=(
+                            f"Both routes travel to {r_a.get('destination', 'destination')}. Simultaneous consolidation is not feasible "
+                            f"as combined demand ({total_students} students) exceeds maximum bus capacity ({max_capacity} seats). "
+                            f"However, individual route demands ({students_a} and {students_b} students) each fit within {max_capacity} seats, "
+                            f"allowing 1 bus to service both routes in staggered shifts."
+                        ),
+                        capacity_check_passed=False,
+                        current_config=current_config,
+                        proposed_config=proposed_config,
+                        estimated_distance_reduction_km=0.0,
+                        estimated_fuel_savings_liters=0.0,
+                        estimated_monthly_savings_inr=0.0,
+                        estimated_emissions_reduction_kg=0.0,
+                        feasibility="Needs Validation",
+                        required_validation=[
+                            "Validate campus timetable and class schedules to confirm arrival windows allow sequential shifts.",
+                            "Confirm vehicle turnaround and driver duty hours permit operating both routes consecutively.",
+                            f"Verify that total simultaneous passenger count never exceeds {max_capacity} on any single trip.",
+                        ],
+                        assumptions=[
+                            "1 bus operates sequential shifts for both routes; trips are not run simultaneously.",
+                            f"Total daily distance remains {current_total_dist} km as both trips must be operated.",
+                            "Fleet optimization reduces active fleet requirement from 2 buses to 1 bus.",
+                        ],
+                        missing_information=[
+                            "Detailed class start times and permissible arrival windows are not provided.",
+                            "Deadhead transit distance between the end of Route 1 and start of Route 2 is not specified.",
+                        ],
+                        status="pending",
+                    )
+                    proposals.append(proposal)
                 continue
 
             dist_a = float(r_a.get("distance_km", 0.0))

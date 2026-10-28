@@ -8,7 +8,6 @@ async def auth_user_token(async_client: AsyncClient) -> str:
         "full_name": "Fleet Manager",
         "email": "fleet@carboniq.org",
         "password": "Password123!",
-        "account_type": "organization",
     }
     res = await async_client.post("/api/auth/register", json=payload)
     return res.json()["access_token"]
@@ -133,3 +132,54 @@ async def test_transportation_crud_and_summary(
     # Delete
     r_del = await async_client.delete(f"/api/transportation/{rec_id}", headers=headers)
     assert r_del.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_transportation_fuel_type_validation(
+    async_client: AsyncClient,
+    auth_user_token: str,
+    auth_header_helper,
+):
+    headers = auth_header_helper(auth_user_token)
+
+    # 1. Invalid fuel type must be rejected with 422
+    invalid_payload = {
+        "date": "2026-03-20",
+        "mode": "Bus",
+        "distance_km": 100.0,
+        "fuel_type": "InvalidFuel",
+        "fuel_consumed_liters": 25.0,
+    }
+    r_invalid = await async_client.post("/api/transportation", json=invalid_payload, headers=headers)
+    assert r_invalid.status_code == 422
+    data = r_invalid.json()
+    assert "detail" in data
+    assert any("Invalid fuel type 'InvalidFuel'" in err.get("msg", "") for err in data["detail"])
+
+    # 2. Verify no database record was created for the invalid request
+    r_list = await async_client.get("/api/transportation", headers=headers)
+    assert r_list.status_code == 200
+    assert len(r_list.json()) == 0
+
+    # 3. Valid fuel types are accepted
+    for fuel in ["Diesel", "Petrol", "CNG", "Electric"]:
+        valid_payload = {
+            "date": "2026-03-20",
+            "mode": "Bus",
+            "distance_km": 50.0,
+            "fuel_type": fuel,
+            "fuel_consumed_liters": 10.0,
+        }
+        r_valid = await async_client.post("/api/transportation", json=valid_payload, headers=headers)
+        assert r_valid.status_code == 201, f"Expected 201 for valid fuel {fuel}, got {r_valid.status_code}"
+        assert r_valid.json()["fuel_type"] == fuel
+
+    # 4. Updating with invalid fuel type is also rejected with 422
+    existing_id = r_valid.json()["id"]
+    r_update_invalid = await async_client.put(
+        f"/api/transportation/{existing_id}",
+        json={"fuel_type": "Kerosene"},
+        headers=headers,
+    )
+    assert r_update_invalid.status_code == 422
+    assert any("Invalid fuel type 'Kerosene'" in err.get("msg", "") for err in r_update_invalid.json()["detail"])

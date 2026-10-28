@@ -33,6 +33,8 @@ async def test_electricity_crud_and_calculations(
     assert r_create.status_code == 201
     created = r_create.json()
     assert created["consumption_kwh"] == 1000.0
+    assert created["bill_amount_inr"] == 8500.0
+    assert created["building_or_department"] == "Engineering Wing"
     assert created["calculated_emissions_kg"] == 820.0
     assert created["emission_factor_used"] == 0.82
     record_id = created["id"]
@@ -102,3 +104,55 @@ async def test_electricity_input_validation(
     }
     r_month = await async_client.post("/api/electricity", json=bad_month_payload, headers=headers)
     assert r_month.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_electricity_field_aliases_and_persistence(
+    async_client: AsyncClient,
+    auth_user_token: str,
+    auth_header_helper,
+):
+    headers = auth_header_helper(auth_user_token)
+
+    # Create using Postman field names: bill_amount and building
+    postman_payload = {
+        "reporting_month": "2026-03",
+        "consumption_kwh": 1240.0,
+        "bill_amount": 10540.0,
+        "building": "Engineering Academic Wing",
+        "notes": "Post semester break energy audit",
+    }
+    r_create = await async_client.post("/api/electricity", json=postman_payload, headers=headers)
+    assert r_create.status_code == 201
+    created = r_create.json()
+    assert created["consumption_kwh"] == 1240.0
+    assert created["bill_amount_inr"] == 10540.0
+    assert created["building_or_department"] == "Engineering Academic Wing"
+    assert created["calculated_emissions_kg"] == 1016.8
+    assert created["emission_factor_used"] == 0.82
+    assert created["factor_type"] == "illustrative_grid_factor"
+    record_id = created["id"]
+
+    # Verify persistence via GET
+    r_get = await async_client.get(f"/api/electricity/{record_id}", headers=headers)
+    assert r_get.status_code == 200
+    fetched = r_get.json()
+    assert fetched["bill_amount_inr"] == 10540.0
+    assert fetched["building_or_department"] == "Engineering Academic Wing"
+
+    # Update using alias fields
+    update_payload = {
+        "bill_amount": 11200.0,
+        "building": "Main Administrative Block",
+    }
+    r_update = await async_client.put(f"/api/electricity/{record_id}", json=update_payload, headers=headers)
+    assert r_update.status_code == 200
+    updated = r_update.json()
+    assert updated["bill_amount_inr"] == 11200.0
+    assert updated["building_or_department"] == "Main Administrative Block"
+
+    # Verify persisted update via GET
+    r_get_updated = await async_client.get(f"/api/electricity/{record_id}", headers=headers)
+    assert r_get_updated.status_code == 200
+    assert r_get_updated.json()["bill_amount_inr"] == 11200.0
+    assert r_get_updated.json()["building_or_department"] == "Main Administrative Block"

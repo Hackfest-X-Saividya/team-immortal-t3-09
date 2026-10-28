@@ -1,13 +1,24 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from app.utils.dates import normalize_month
 
 
 class ElectricityCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     reporting_month: str = Field(..., description="Reporting month (YYYY-MM or YYYY-MM-DD)")
     consumption_kwh: float = Field(..., ge=0, description="Electricity consumption in kWh")
-    bill_amount_inr: Optional[float] = Field(None, ge=0, description="Optional recorded bill amount in INR")
-    building_or_department: Optional[str] = Field(None, max_length=100)
+    bill_amount_inr: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("bill_amount_inr", "bill_amount"),
+        ge=0,
+        description="Optional recorded bill amount in INR",
+    )
+    building_or_department: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("building_or_department", "building", "department"),
+        max_length=100,
+    )
     notes: Optional[str] = Field(None, max_length=500)
 
     @field_validator("reporting_month")
@@ -20,10 +31,19 @@ class ElectricityCreateRequest(BaseModel):
 
 
 class ElectricityUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     reporting_month: Optional[str] = None
     consumption_kwh: Optional[float] = Field(None, ge=0)
-    bill_amount_inr: Optional[float] = Field(None, ge=0)
-    building_or_department: Optional[str] = None
+    bill_amount_inr: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("bill_amount_inr", "bill_amount"),
+        ge=0,
+    )
+    building_or_department: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("building_or_department", "building", "department"),
+    )
     notes: Optional[str] = None
 
     @field_validator("reporting_month")

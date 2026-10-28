@@ -1,17 +1,11 @@
-from typing import Literal, Optional
+from typing import Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
-
-AccountType = Literal["individual", "college", "organization"]
 
 
 class UserRegisterRequest(BaseModel):
     full_name: str = Field(..., min_length=2, max_length=100, description="User full name")
     email: EmailStr = Field(..., description="Valid unique email address")
     password: str = Field(..., min_length=8, max_length=100, description="Minimum 8 characters password")
-    account_type: AccountType = Field(
-        default="individual",
-        description="Role / account type: individual, college, or organization",
-    )
     workspace_name: Optional[str] = Field(None, max_length=100, description="Optional custom workspace title")
 
     @field_validator("email")
@@ -43,7 +37,6 @@ class UserProfileResponse(BaseModel):
     email: str
     workspace_id: str
     workspace_name: str
-    account_type: str = "individual"
     created_at: str
     avatar_url: Optional[str] = None
     initials: str

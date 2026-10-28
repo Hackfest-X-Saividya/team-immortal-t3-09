@@ -1,16 +1,12 @@
-from typing import Any, Dict, List
-from fastapi import APIRouter, Depends, Query, status
-from app.api.dependencies import (
-    get_current_user,
-    get_current_workspace_id,
-    get_db_dep,
-    require_transportation_access,
-)
+from typing import Any, Dict, List, Optional, Union
+from fastapi import APIRouter, Body, Depends, Query, status
+from app.api.dependencies import get_current_user, get_current_workspace_id, get_db_dep
 from app.calculations.route_optimizer import RouteOptimizationProposal
 from app.schemas.bus_route import (
     BusRouteCreateRequest,
     BusRouteResponse,
     BusRouteUpdateRequest,
+    RouteOptimizationRequest,
     RouteOptimizationResponse,
 )
 from app.services.bus_route_service import (
@@ -23,11 +19,7 @@ from app.services.bus_route_service import (
     update_bus_route,
 )
 
-router = APIRouter(
-    prefix="/transportation",
-    tags=["Bus Route Management & Optimization"],
-    dependencies=[Depends(require_transportation_access)],
-)
+router = APIRouter(prefix="/transportation", tags=["Bus Route Management & Optimization"])
 
 
 @router.get("/routes", response_model=List[BusRouteResponse])
@@ -54,6 +46,8 @@ async def create_route(
 
 @router.post("/optimize", response_model=RouteOptimizationResponse)
 async def optimize_routes(
+    payload: Optional[Union[RouteOptimizationRequest, List[str]]] = Body(None),
+    route_ids: Optional[List[str]] = Query(None),
     workspace_id: str = Depends(get_current_workspace_id),
     db: Any = Depends(get_db_dep),
 ) -> RouteOptimizationResponse:
@@ -61,7 +55,15 @@ async def optimize_routes(
     Evaluates candidate bus routes for feasible consolidation opportunities.
     Considers student demand, seating capacity, and shared corridors.
     """
-    return await optimize_workspace_bus_routes(workspace_id, db)
+    target_ids = None
+    if isinstance(payload, list):
+        target_ids = payload
+    elif isinstance(payload, RouteOptimizationRequest) and payload.route_ids is not None:
+        target_ids = payload.route_ids
+    elif route_ids is not None:
+        target_ids = route_ids
+
+    return await optimize_workspace_bus_routes(workspace_id, db, route_ids=target_ids)
 
 
 @router.post("/optimize/accept", status_code=status.HTTP_201_CREATED)

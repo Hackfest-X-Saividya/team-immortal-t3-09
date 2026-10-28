@@ -1,5 +1,8 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+SUPPORTED_FUEL_TYPES = ("Diesel", "Petrol", "CNG", "Electric")
+_FUEL_TYPE_MAP = {f.lower(): f for f in SUPPORTED_FUEL_TYPES}
 
 
 class TransportationCreateRequest(BaseModel):
@@ -14,6 +17,18 @@ class TransportationCreateRequest(BaseModel):
     passenger_count: Optional[int] = Field(None, ge=0)
     notes: Optional[str] = Field(None, max_length=500)
 
+    @field_validator("fuel_type")
+    @classmethod
+    def validate_fuel_type(cls, v: Optional[str]) -> str:
+        if v is None:
+            return "Diesel"
+        cleaned = v.strip()
+        matched = _FUEL_TYPE_MAP.get(cleaned.lower())
+        if not matched:
+            supported = ", ".join(SUPPORTED_FUEL_TYPES)
+            raise ValueError(f"Invalid fuel type '{v}'. Supported fuel types are: {supported}")
+        return matched
+
 
 class TransportationUpdateRequest(BaseModel):
     date: Optional[str] = None
@@ -26,6 +41,18 @@ class TransportationUpdateRequest(BaseModel):
     vehicle_id: Optional[str] = None
     passenger_count: Optional[int] = Field(None, ge=0)
     notes: Optional[str] = None
+
+    @field_validator("fuel_type")
+    @classmethod
+    def validate_fuel_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        matched = _FUEL_TYPE_MAP.get(cleaned.lower())
+        if not matched:
+            supported = ", ".join(SUPPORTED_FUEL_TYPES)
+            raise ValueError(f"Invalid fuel type '{v}'. Supported fuel types are: {supported}")
+        return matched
 
 
 class TransportationRecordResponse(BaseModel):

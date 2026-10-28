@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
+
 from app.calculations.route_optimizer import RouteOptimizationProposal
 
 
@@ -12,15 +13,22 @@ class BusRouteCreateRequest(BaseModel):
     duration_minutes: int = Field(..., gt=0)
     trips_per_day: int = Field(default=2, ge=1)
     operating_days_per_week: int = Field(default=5, ge=1, le=7)
+    seating_capacity: int = Field(default=40, ge=1)
     assigned_students: int = Field(..., ge=0)
     bus_id: str = Field(..., min_length=1, max_length=50)
     fuel_type: str = Field(default="Diesel")
     fuel_efficiency_km_per_l: float = Field(default=4.5, gt=0)
     fuel_consumption_per_day_liters: Optional[float] = Field(None, ge=0)
-    seating_capacity: int = Field(default=40, ge=1)
     current_buses_count: int = Field(default=1, ge=1)
     status: str = Field(default="active")  # "active" | "consolidated" | "under_review"
     notes: Optional[str] = None
+
+    @validator('assigned_students')
+    def check_capacity(cls, v, values):
+        capacity = values.get('seating_capacity')
+        if capacity is not None and v > capacity:
+            raise ValueError(f'assigned_students ({v}) exceeds seating_capacity ({capacity})')
+        return v
 
 
 class BusRouteUpdateRequest(BaseModel):
@@ -65,6 +73,10 @@ class BusRouteResponse(BaseModel):
     notes: Optional[str] = None
     created_at: str
     updated_at: str
+
+
+class RouteOptimizationRequest(BaseModel):
+    route_ids: Optional[List[str]] = Field(default=None, description="Optional list of specific route IDs to optimize")
 
 
 class RouteOptimizationResponse(BaseModel):

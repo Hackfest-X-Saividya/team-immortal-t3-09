@@ -108,14 +108,34 @@ async def delete_bus_route(
 async def optimize_workspace_bus_routes(
     workspace_id: str,
     db: Any,
+    route_ids: Optional[List[str]] = None,
 ) -> RouteOptimizationResponse:
+    if route_ids is not None:
+        routes = []
+        for rid in route_ids:
+            clean_id = str(rid).strip() if rid is not None else ""
+            if not clean_id:
+                raise EntityNotFoundException("Invalid or empty bus route ID.")
+            doc = await db.bus_routes.find_one({"id": clean_id, "workspace_id": workspace_id})
+            if not doc:
+                raise EntityNotFoundException(f"Bus route '{clean_id}' not found.")
+            doc.pop("_id", None)
+            routes.append(doc)
+
+        proposals = optimize_bus_routes(routes, is_targeted=True)
+        return RouteOptimizationResponse(
+            proposals=proposals,
+            analyzed_routes_count=len(routes),
+            timestamp=utc_iso(),
+        )
+
     cursor = db.bus_routes.find({"workspace_id": workspace_id, "status": "active"})
     routes = []
     async for item in cursor:
         item.pop("_id", None)
         routes.append(item)
 
-    proposals = optimize_bus_routes(routes)
+    proposals = optimize_bus_routes(routes, is_targeted=False)
     return RouteOptimizationResponse(
         proposals=proposals,
         analyzed_routes_count=len(routes),
