@@ -13,16 +13,17 @@ import {
   DEFAULT_DEMO_SESSION,
   DEFAULT_DEMO_USER,
 } from '@/services/auth.service'
-import type { UserProfile, UserSession } from '@/types/auth'
+import type { AccountType, UserProfile, UserSession } from '@/types/auth'
 
 export interface AuthContextType {
   session: UserSession
   user: UserProfile
   isHydrated: boolean
-  signIn: (email: string, name?: string, workspaceName?: string) => void
+  signIn: (email: string, name?: string, workspaceName?: string, accountType?: AccountType) => void
   signUp: (profile: {
     name: string
     email: string
+    accountType?: AccountType
     workspaceName?: string
   }) => void
   signOut: () => void
@@ -55,15 +56,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const signIn = useCallback(
-    (email: string, name?: string, workspaceName?: string) => {
-      const newSession = authService.signInDemo(email, name, workspaceName)
+    (email: string, name?: string, workspaceName?: string, accountType?: AccountType) => {
+      const newSession = authService.signInDemo(email, name, workspaceName, accountType)
       setSession(newSession)
     },
     []
   )
 
   const signUp = useCallback(
-    (profile: { name: string; email: string; workspaceName?: string }) => {
+    (profile: { name: string; email: string; accountType?: AccountType; workspaceName?: string }) => {
       const newSession = authService.signUpDemo(profile)
       setSession(newSession)
     },

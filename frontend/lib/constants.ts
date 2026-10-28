@@ -5,7 +5,6 @@ import {
   FileText,
   Recycle,
   Target,
-  TrendingDown,
   Zap,
 } from 'lucide-react'
 import type { NavItem } from '../types/dashboard'
@@ -62,8 +61,7 @@ export const DASHBOARD_NAV_ITEMS: NavItem[] = [
   { id: 'waste', label: 'Waste management', href: '/dashboard/waste', icon: Recycle },
   { id: 'insights', label: 'AI insights', href: '/dashboard/insights', icon: BrainCircuit },
   { id: 'simulator', label: 'Savings simulator', href: '/dashboard/simulator', icon: Target },
-  { id: 'progress', label: 'Progress tracking', href: '/dashboard/progress', icon: TrendingDown },
-  { id: 'reports', label: 'Reports', href: '/dashboard/reports', icon: FileText },
+  { id: 'reports', label: 'Reports & exports', href: '/dashboard/reports', icon: FileText },
 ]
 
 export const DEFAULT_RECOMMENDATIONS: Recommendation[] = [

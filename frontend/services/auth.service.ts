@@ -1,4 +1,4 @@
-import type { UserProfile, UserSession } from '../types/auth'
+import type { AccountType, UserProfile, UserSession } from '../types/auth'
 
 export const SESSION_STORAGE_KEY = 'carboniq_session'
 
@@ -35,6 +35,7 @@ export const DEFAULT_DEMO_USER: UserProfile = {
   name: 'Aarav Kapoor',
   email: 'demo@carboniq.local',
   workspaceName: 'Demo Workspace',
+  accountType: 'individual',
   createdAt: '2026-10-01T00:00:00.000Z',
   initials: 'AK',
 }
@@ -58,8 +59,8 @@ function isValidSession(session: any): session is UserSession {
 }
 
 /**
- * Frontend auth service managing demo and authenticated demo sessions.
- * Never stores passwords. Prepares clean single-workspace signatures for FastAPI endpoints.
+ * Frontend auth service managing demo and authenticated sessions.
+ * Never stores passwords. Prepares clean signatures for FastAPI endpoints.
  */
 export const authService = {
   getStoredSession(): UserSession | null {
@@ -69,12 +70,17 @@ export const authService = {
       if (!stored) return null
       const parsed = JSON.parse(stored)
       if (isValidSession(parsed)) {
+        const rawAccountType = parsed.user.accountType
+        const safeAccountType: AccountType =
+          rawAccountType === 'college' || rawAccountType === 'organization' ? rawAccountType : 'individual'
+
         return {
           ...parsed,
           user: {
             ...parsed.user,
             id: parsed.user.id || (parsed.mode === 'demo' ? 'demo-user-aarav' : 'user-auth'),
             workspaceName: parsed.user.workspaceName || (parsed.mode === 'demo' ? 'Demo Workspace' : 'Sustainability Workspace'),
+            accountType: safeAccountType,
             initials: parsed.user.initials || computeInitials(parsed.user.name),
           },
         }
@@ -94,13 +100,14 @@ export const authService = {
     }
   },
 
-  createDemoSession(workspaceName: string = 'Demo Workspace'): UserSession {
+  createDemoSession(workspaceName: string = 'Demo Workspace', accountType: AccountType = 'individual'): UserSession {
     const session: UserSession = {
       mode: 'demo',
       isAuthenticated: false,
       user: {
         ...DEFAULT_DEMO_USER,
         workspaceName,
+        accountType,
       },
       createdAt: new Date().toISOString(),
     }
@@ -111,7 +118,8 @@ export const authService = {
   signInDemo(
     email: string,
     providedName?: string,
-    workspaceName?: string
+    workspaceName?: string,
+    accountType?: AccountType
   ): UserSession {
     const name = providedName?.trim() || formatNameFromEmail(email)
     const session: UserSession = {
@@ -122,6 +130,7 @@ export const authService = {
         name,
         email: email.trim(),
         workspaceName: workspaceName?.trim() || 'Sustainability Workspace',
+        accountType: accountType || 'individual',
         initials: computeInitials(name),
         createdAt: new Date().toISOString(),
       },
@@ -134,9 +143,11 @@ export const authService = {
   signUpDemo(profile: {
     name: string
     email: string
+    accountType?: AccountType
     workspaceName?: string
   }): UserSession {
     const name = profile.name.trim()
+    const safeAccountType: AccountType = profile.accountType || 'individual'
     const session: UserSession = {
       mode: 'authenticated',
       isAuthenticated: true,
@@ -145,6 +156,7 @@ export const authService = {
         name,
         email: profile.email.trim(),
         workspaceName: profile.workspaceName?.trim() || `${name}'s Workspace`,
+        accountType: safeAccountType,
         initials: computeInitials(name),
         createdAt: new Date().toISOString(),
       },

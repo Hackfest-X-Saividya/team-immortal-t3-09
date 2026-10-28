@@ -12,7 +12,7 @@ export function LandingHeader() {
   return (
     <header className="mx-auto flex max-w-[1240px] items-center justify-between px-6 py-5 lg:px-8">
       <Logo onClick={() => router.push('/')} />
-      <nav className="hidden items-center gap-8 text-sm text-[#65756A] md:flex">
+      <nav className="hidden items-center gap-8 text-sm font-medium text-[#4D6053] md:flex">
         <a href="#features" className="hover:text-[#285943]">
           Features
         </a>

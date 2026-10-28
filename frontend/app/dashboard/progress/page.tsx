@@ -1,8 +1,5 @@
-'use client'
-
-import React from 'react'
-import { SimplePageView } from '@/components/dashboard/SimplePageView'
+import { redirect } from 'next/navigation'
 
 export default function ProgressPage() {
-  return <SimplePageView view="progress" />
+  redirect('/dashboard/reports')
 }

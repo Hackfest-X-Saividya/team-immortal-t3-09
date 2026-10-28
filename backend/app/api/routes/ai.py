@@ -1,6 +1,10 @@
 from typing import Any
 from fastapi import APIRouter, Depends
-from app.api.dependencies import get_current_workspace_id, get_db_dep
+from app.api.dependencies import (
+    get_current_workspace_id,
+    get_db_dep,
+    require_transportation_access,
+)
 from app.schemas.ai import AiChatRequest, AiChatResponse
 from app.services.ai_assistant_service import AiAssistantService
 
@@ -22,6 +26,7 @@ async def query_transportation_assistant(
     req: AiChatRequest,
     workspace_id: str = Depends(get_current_workspace_id),
     db: Any = Depends(get_db_dep),
+    _role_guard: Any = Depends(require_transportation_access),
 ) -> AiChatResponse:
     """Answers transportation inquiries using bus routes, student occupancy, and fleet logs."""
     return await AiAssistantService.query_transportation_advisor(req.question, workspace_id, db)

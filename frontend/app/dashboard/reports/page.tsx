@@ -1,8 +1,8 @@
 'use client'
 
 import React from 'react'
-import { SimplePageView } from '@/components/dashboard/SimplePageView'
+import { ReportsView } from '@/components/dashboard/ReportsView'
 
 export default function ReportsPage() {
-  return <SimplePageView view="reports" />
+  return <ReportsView />
 }

@@ -2,17 +2,46 @@
 
 import React, { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { Building2, Check, GraduationCap, User } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/Card'
 import { Logo } from '@/components/ui/Logo'
 import { Pill } from '@/components/ui/Pill'
 import { useAuth } from '@/context/auth-context'
 import { isValidEmail } from '@/lib/validation'
-import type { AuthMode } from '@/types/auth'
+import type { AccountType, AuthMode } from '@/types/auth'
 
 export interface AuthFormProps {
   mode: AuthMode
 }
+
+interface RoleOption {
+  id: AccountType
+  label: string
+  description: string
+  icon: React.ElementType
+}
+
+const ROLE_OPTIONS: RoleOption[] = [
+  {
+    id: 'individual',
+    label: 'Individual / Student',
+    description: 'Track personal sustainability, energy usage, and waste.',
+    icon: User,
+  },
+  {
+    id: 'college',
+    label: 'College',
+    description: 'Manage campus sustainability, student transportation, and bus routes.',
+    icon: GraduationCap,
+  },
+  {
+    id: 'organization',
+    label: 'Organization',
+    description: 'Monitor organizational sustainability, resource usage, and transportation.',
+    icon: Building2,
+  },
+]
 
 export function AuthForm({ mode }: AuthFormProps) {
   const router = useRouter()
@@ -23,6 +52,7 @@ export function AuthForm({ mode }: AuthFormProps) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [accountType, setAccountType] = useState<AccountType>('individual')
   const [workspaceName, setWorkspaceName] = useState('')
   const [error, setError] = useState('')
   const [submitted, setSubmitted] = useState(false)
@@ -43,6 +73,9 @@ export function AuthForm({ mode }: AuthFormProps) {
     if (isSignup && password !== confirmPassword) {
       return setError('Passwords do not match.')
     }
+    if (isSignup && !accountType) {
+      return setError('Please select how you will use CarbonIQ.')
+    }
 
     setSubmitted(true)
 
@@ -50,6 +83,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       signUp({
         name: name.trim(),
         email: email.trim(),
+        accountType,
         workspaceName: workspaceName.trim() || undefined,
       })
     } else {
@@ -63,7 +97,7 @@ export function AuthForm({ mode }: AuthFormProps) {
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#F7F8F2] px-5 py-10">
-      <div className="w-full max-w-md">
+      <div className={`w-full ${isSignup ? 'max-w-lg' : 'max-w-md'}`}>
         <Logo onClick={() => router.push('/')} />
         <Card className="mt-8 p-6 sm:p-8">
           <Pill>{isSignup ? 'CREATE YOUR WORKSPACE' : 'WELCOME BACK'}</Pill>
@@ -143,11 +177,71 @@ export function AuthForm({ mode }: AuthFormProps) {
                   />
                 </label>
 
-                <label className="block text-sm text-[#536458]">
+                {/* Role / Account Type Selector */}
+                <div className="pt-2">
+                  <label className="block text-sm font-medium text-[#405448] mb-2">
+                    How will you use CarbonIQ? <span className="text-[#B95D47]">*</span>
+                  </label>
+                  <div className="space-y-2.5" role="radiogroup" aria-label="How will you use CarbonIQ?">
+                    {ROLE_OPTIONS.map((opt) => {
+                      const isSelected = accountType === opt.id
+                      const Icon = opt.icon
+                      return (
+                        <div
+                          key={opt.id}
+                          role="radio"
+                          aria-checked={isSelected}
+                          tabIndex={0}
+                          onClick={() => setAccountType(opt.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === ' ' || e.key === 'Enter') {
+                              e.preventDefault()
+                              setAccountType(opt.id)
+                            }
+                          }}
+                          className={`flex items-start gap-3 rounded-xl p-3 border transition-all cursor-pointer text-left ${
+                            isSelected
+                              ? 'border-[#285943] bg-[#F2F7F1] shadow-xs ring-1 ring-[#285943]'
+                              : 'border-[#E0E7DE] bg-white hover:bg-[#F9FAF7] hover:border-[#CCD8C8]'
+                          }`}
+                        >
+                          <div
+                            className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg transition-colors ${
+                              isSelected ? 'bg-[#285943] text-white' : 'bg-[#EAEFE8] text-[#55695B]'
+                            }`}
+                          >
+                            <Icon size={18} strokeWidth={2} />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between">
+                              <span className={`text-sm font-semibold ${isSelected ? 'text-[#234A36]' : 'text-[#3B4C41]'}`}>
+                                {opt.label}
+                              </span>
+                              <div
+                                className={`h-4 w-4 rounded-full border grid place-items-center transition-colors ${
+                                  isSelected
+                                    ? 'border-[#285943] bg-[#285943] text-white'
+                                    : 'border-[#BDC7BC] bg-white'
+                                }`}
+                              >
+                                {isSelected && <Check size={10} strokeWidth={3} />}
+                              </div>
+                            </div>
+                            <p className="mt-0.5 text-xs text-[#728277] leading-relaxed">
+                              {opt.description}
+                            </p>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                <label className="block text-sm text-[#536458] pt-1">
                   Workspace name <span className="text-xs text-[#8A978D] font-normal">(optional)</span>
                   <input
                     className="field"
-                    placeholder="e.g., Campus Operations or Team Eco"
+                    placeholder="e.g., Campus Operations or Green Living"
                     value={workspaceName}
                     onChange={(e) => setWorkspaceName(e.target.value)}
                   />

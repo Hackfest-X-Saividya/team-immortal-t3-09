@@ -8,6 +8,7 @@ async def auth_user_token(async_client: AsyncClient) -> str:
         "full_name": "Fleet Manager",
         "email": "fleet@carboniq.org",
         "password": "Password123!",
+        "account_type": "organization",
     }
     res = await async_client.post("/api/auth/register", json=payload)
     return res.json()["access_token"]

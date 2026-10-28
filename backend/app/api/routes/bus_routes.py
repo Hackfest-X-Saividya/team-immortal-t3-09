@@ -1,6 +1,11 @@
 from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, Query, status
-from app.api.dependencies import get_current_user, get_current_workspace_id, get_db_dep
+from app.api.dependencies import (
+    get_current_user,
+    get_current_workspace_id,
+    get_db_dep,
+    require_transportation_access,
+)
 from app.calculations.route_optimizer import RouteOptimizationProposal
 from app.schemas.bus_route import (
     BusRouteCreateRequest,
@@ -18,7 +23,11 @@ from app.services.bus_route_service import (
     update_bus_route,
 )
 
-router = APIRouter(prefix="/transportation", tags=["Bus Route Management & Optimization"])
+router = APIRouter(
+    prefix="/transportation",
+    tags=["Bus Route Management & Optimization"],
+    dependencies=[Depends(require_transportation_access)],
+)
 
 
 @router.get("/routes", response_model=List[BusRouteResponse])

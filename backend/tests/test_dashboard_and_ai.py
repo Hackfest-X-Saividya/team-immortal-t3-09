@@ -10,6 +10,7 @@ async def seeded_workspace(async_client: AsyncClient, auth_header_helper):
         "email": "officer@carboniq.org",
         "password": "Password123!",
         "workspace_name": "Innovation Tech Park",
+        "account_type": "organization",
     }
     r_reg = await async_client.post("/api/auth/register", json=reg)
     token = r_reg.json()["access_token"]

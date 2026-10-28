@@ -21,7 +21,7 @@ export function HowItWorksSection() {
               From data to direction.
             </h2>
           </div>
-          <p className="max-w-[300px] text-sm leading-6 text-[#647568]">
+          <p className="max-w-[300px] text-sm leading-6 text-[#3B5442]">
             A repeatable loop for better decisions, not another dashboard to babysit.
           </p>
         </div>
@@ -29,9 +29,9 @@ export function HowItWorksSection() {
         <div className="mt-12 grid gap-8 md:grid-cols-4">
           {steps.map(({ num, title, desc }) => (
             <div key={num} className="relative border-t border-[#B8CFB4] pt-5">
-              <span className="text-xs font-semibold tracking-[.14em] text-[#8BA482]">{num}</span>
-              <h3 className="mt-5 text-lg font-semibold text-[#285943]">{title}</h3>
-              <p className="mt-2 text-sm leading-6 text-[#6F8072]">{desc}</p>
+              <span className="text-xs font-bold tracking-[.14em] text-[#285943]">{num}</span>
+              <h3 className="mt-5 text-lg font-semibold text-[#1F3D2C]">{title}</h3>
+              <p className="mt-2 text-sm leading-6 text-[#3E5244]">{desc}</p>
             </div>
           ))}
         </div>

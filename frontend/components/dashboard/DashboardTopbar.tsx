@@ -34,7 +34,7 @@ export function DashboardTopbar({ onOpenMobile }: DashboardTopbarProps) {
     : `Explore your ${(title || 'workspace').toLowerCase()} data and actions.`
 
   return (
-    <header className="relative flex h-[76px] items-center justify-between border-b border-[#E0E7DE] bg-[#FBFCF8] px-5 sm:px-8">
+    <header className="relative flex h-[76px] shrink-0 items-center justify-between border-b border-[#E0E7DE] bg-[#FBFCF8] px-5 sm:px-8">
       <div className="flex items-center gap-3">
         <button
           type="button"

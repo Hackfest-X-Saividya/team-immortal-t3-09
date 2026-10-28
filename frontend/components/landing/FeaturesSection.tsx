@@ -44,9 +44,9 @@ export function FeaturesSection() {
       <div className="max-w-[620px]">
         <Pill>ONE CLEAR VIEW</Pill>
         <h2 className="mt-4 text-4xl font-semibold tracking-[-.05em] text-[#234A36]">
-          Turn scattered data into <span className="text-[#9AAD75]">clear action.</span>
+          Turn scattered data into <span className="text-[#3B6B38]">clear action.</span>
         </h2>
-        <p className="mt-4 text-[#748178]">
+        <p className="mt-4 text-[#4D6053] leading-relaxed">
           CarbonIQ brings the everyday decisions behind your footprint into one calm, connected
           workspace.
         </p>
@@ -62,7 +62,7 @@ export function FeaturesSection() {
               <Icon size={19} />
             </span>
             <h3 className="mt-5 font-semibold text-[#2F4436]">{title}</h3>
-            <p className="mt-2 text-sm leading-6 text-[#7A887D]">{desc}</p>
+            <p className="mt-2 text-sm leading-6 text-[#4E6254]">{desc}</p>
           </Card>
         ))}
       </div>

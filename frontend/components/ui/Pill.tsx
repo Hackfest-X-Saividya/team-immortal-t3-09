@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { cn } from '@/lib/utils'
 
 export interface PillProps {
   children: React.ReactNode
@@ -8,17 +9,21 @@ export interface PillProps {
   className?: string
 }
 
-export function Pill({ children, tone = 'green', className = '' }: PillProps) {
+export function Pill({ children, tone = 'green', className }: PillProps) {
   const toneClasses =
     tone === 'amber'
-      ? 'bg-[#FBF1D8] text-[#8A6C2E]'
+      ? 'bg-[#FBF1D8] text-[#7A5A1B] font-semibold'
       : tone === 'sage'
-        ? 'bg-[#EDF2EA] text-[#60745F]'
-        : 'bg-[#E7F1E5] text-[#285943]'
+        ? 'bg-[#EDF2EA] text-[#344D3B] font-semibold'
+        : 'bg-[#E7F1E5] text-[#285943] font-semibold'
 
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${toneClasses} ${className}`}
+      className={cn(
+        'inline-flex items-center rounded-full px-2.5 py-1 text-[11px] tracking-wide',
+        toneClasses,
+        className
+      )}
     >
       {children}
     </span>

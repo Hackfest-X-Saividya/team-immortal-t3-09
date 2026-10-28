@@ -39,7 +39,7 @@ export function AudienceSection() {
       <div className="text-center">
         <Pill>BUILT FOR YOUR CONTEXT</Pill>
         <h2 className="mt-4 text-4xl font-semibold tracking-[-.05em] text-[#234A36]">
-          One platform, <span className="text-[#9AAD75]">your priorities.</span>
+          One platform, <span className="text-[#3B6B38]">your priorities.</span>
         </h2>
       </div>
 
@@ -55,7 +55,7 @@ export function AudienceSection() {
               <Icon size={20} />
             </span>
             <h3 className="mt-6 text-lg font-semibold text-[#2F4436]">{title}</h3>
-            <p className="mt-2 text-sm leading-6 text-[#7A887D]">{desc}</p>
+            <p className="mt-2 text-sm leading-6 text-[#4E6254]">{desc}</p>
             <span className="mt-6 inline-flex items-center gap-1 text-sm font-medium text-[#285943]">
               Explore workspace <ArrowRight size={15} />
             </span>

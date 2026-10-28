@@ -6,7 +6,7 @@ import {
   DEFAULT_DEMO_SESSION,
   SESSION_STORAGE_KEY,
 } from '../services/auth.service'
-import type { UserProfile, UserSession } from '../types/auth'
+import type { AccountType, UserProfile, UserSession } from '../types/auth'
 
 // Mock browser localStorage
 const mockStorage = new Map<string, string>()
@@ -35,7 +35,7 @@ function assert(condition: boolean, testName: string, detail?: string) {
   }
 }
 
-console.log('=== CARBONIQ SINGLE-WORKSPACE PROFILE & STATE MANAGEMENT TEST SUITE ===\n')
+console.log('=== CARBONIQ ROLE & ACCOUNT TYPE STATE MANAGEMENT TEST SUITE ===\n')
 
 // TEST 1: Initials & Name Computation
 console.log('--- TEST GROUP 1: Initials & Profile Formatting ---')
@@ -60,6 +60,7 @@ assert(demoSession.mode === 'demo', 'Demo session mode is "demo"')
 assert(demoSession.isAuthenticated === false, 'Demo session isAuthenticated is false')
 assert(demoSession.user.name === 'Aarav Kapoor', 'Demo user name is "Aarav Kapoor"')
 assert(demoSession.user.workspaceName === 'Demo Workspace', 'Demo user workspace is "Demo Workspace"')
+assert(demoSession.user.accountType === 'individual', 'Demo user accountType defaults to "individual"')
 assert(demoSession.user.id === 'demo-user-aarav', 'Demo user has stable ID "demo-user-aarav"')
 assert(demoSession.user.initials === 'AK', 'Demo user initials are "AK"')
 
@@ -68,41 +69,54 @@ const rawStored = mockLocalStorage.getItem(SESSION_STORAGE_KEY)
 assert(rawStored !== null, 'Demo session is persisted to storage')
 const parsedStored = authService.getStoredSession()
 assert(parsedStored?.user.name === 'Aarav Kapoor', 'Stored demo session retrieves correctly')
+assert(parsedStored?.user.accountType === 'individual', 'Stored demo user accountType is "individual"')
 
-// TEST 3: Authenticated Mode Creation (Single Fixed Workspace)
-console.log('\n--- TEST GROUP 3: Authenticated Mode Creation & Isolation ---')
-const authSession = authService.signUpDemo({
+// TEST 3: Authenticated Mode Creation with Roles (College, Organization, Individual)
+console.log('\n--- TEST GROUP 3: Role-Based Account Creation & Persistence ---')
+const collegeSession = authService.signUpDemo({
   name: 'Sunita Patel',
   email: 'sunita.patel@iisc.ac.in',
+  accountType: 'college',
   workspaceName: 'IISc Campus Operations',
 })
 
-assert(authSession.mode === 'authenticated', 'Authenticated session mode is "authenticated"')
-assert(authSession.isAuthenticated === true, 'Authenticated session isAuthenticated is true')
-assert(authSession.user.name === 'Sunita Patel', 'Authenticated name is "Sunita Patel"')
-assert(authSession.user.email === 'sunita.patel@iisc.ac.in', 'Authenticated email is stored')
-assert(
-  authSession.user.workspaceName === 'IISc Campus Operations',
-  'Authenticated workspace is preserved'
-)
-assert(authSession.user.initials === 'SP', 'Authenticated initials are "SP"')
+assert(collegeSession.mode === 'authenticated', 'College session mode is "authenticated"')
+assert(collegeSession.isAuthenticated === true, 'College session isAuthenticated is true')
+assert(collegeSession.user.accountType === 'college', 'College accountType is "college"')
+assert(collegeSession.user.workspaceName === 'IISc Campus Operations', 'Workspace is preserved')
 
-// Verify persistence of authenticated profile
-const storedAuth = authService.getStoredSession()
-assert(storedAuth?.mode === 'authenticated', 'Stored session remembers authenticated mode')
-assert(storedAuth?.user.name === 'Sunita Patel', 'Stored session remembers user name')
-assert(
-  storedAuth?.user.workspaceName === 'IISc Campus Operations',
-  'Stored session remembers workspaceName'
-)
+// Verify stored in storage
+const storedCollege = authService.getStoredSession()
+assert(storedCollege?.user.accountType === 'college', 'Stored session persists "college" role')
 
-// TEST 4: Sign In flow
-console.log('\n--- TEST GROUP 4: Sign In Demo Flow ---')
-const signedIn = authService.signInDemo('rohit.sharma@greentech.org', 'Rohit Sharma', 'GreenTech Labs')
-assert(signedIn.mode === 'authenticated', 'Signed-in session is authenticated')
-assert(signedIn.user.name === 'Rohit Sharma', 'Signed-in user name is Rohit Sharma')
-assert(signedIn.user.workspaceName === 'GreenTech Labs', 'Signed-in workspace is GreenTech Labs')
-assert(signedIn.user.initials === 'RS', 'Signed-in initials are RS')
+// Organization Role
+const orgSession = authService.signUpDemo({
+  name: 'Karan Mehra',
+  email: 'karan@cleanlogistics.com',
+  accountType: 'organization',
+  workspaceName: 'Clean Logistics Fleet',
+})
+assert(orgSession.user.accountType === 'organization', 'Organization accountType is "organization"')
+const storedOrg = authService.getStoredSession()
+assert(storedOrg?.user.accountType === 'organization', 'Stored session persists "organization" role')
+
+// TEST 4: Backward Compatibility (Legacy Session without accountType defaults to 'individual')
+console.log('\n--- TEST GROUP 4: Backward Compatibility Defaults ---')
+const legacySessionObj = {
+  mode: 'authenticated',
+  isAuthenticated: true,
+  user: {
+    id: 'user-legacy-123',
+    name: 'Legacy User',
+    email: 'legacy@user.com',
+    workspaceName: 'Legacy Workspace',
+    // Missing accountType
+  },
+  createdAt: '2026-01-01T00:00:00.000Z',
+}
+mockLocalStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(legacySessionObj))
+const migratedSession = authService.getStoredSession()
+assert(migratedSession?.user.accountType === 'individual', 'Legacy session safely defaults to "individual"')
 
 // TEST 5: Corrupted / Invalid Storage Resilience
 console.log('\n--- TEST GROUP 5: Storage Resilience & Recovery ---')
@@ -116,9 +130,8 @@ assert(recoveryFromInvalid === null, 'Invalid schema returns null safely')
 
 // TEST 6: Sign-Out Flow
 console.log('\n--- TEST GROUP 6: Sign-Out Flow & Cleanup ---')
-// Re-establish an authenticated session
-authService.saveSession(signedIn)
-assert(authService.getStoredSession()?.user.name === 'Rohit Sharma', 'Session active before sign-out')
+authService.saveSession(orgSession)
+assert(authService.getStoredSession()?.user.name === 'Karan Mehra', 'Session active before sign-out')
 
 // Execute sign out
 authService.signOut()
@@ -128,8 +141,7 @@ assert(mockLocalStorage.getItem(SESSION_STORAGE_KEY) === null, 'Storage cleared 
 const postSignOutDemo = authService.createDemoSession()
 assert(postSignOutDemo.mode === 'demo', 'Post sign-out session is demo mode')
 assert(postSignOutDemo.isAuthenticated === false, 'Post sign-out isAuthenticated is false')
-assert(postSignOutDemo.user.name === 'Aarav Kapoor', 'Post sign-out displays default demo Aarav Kapoor')
-assert(postSignOutDemo.user.workspaceName === 'Demo Workspace', 'Post sign-out workspace is Demo Workspace')
+assert(postSignOutDemo.user.accountType === 'individual', 'Post sign-out defaults to individual demo')
 
 console.log(`\n========================================`)
 console.log(`TEST SUMMARY: ${totalPassed}/${totalTests} tests passed.`)

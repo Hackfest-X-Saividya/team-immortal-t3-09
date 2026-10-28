@@ -21,9 +21,9 @@ export function HeroSection() {
       <div>
         <Pill>THE SUSTAINABILITY OPERATING SYSTEM</Pill>
         <h1 className="mt-6 max-w-[610px] text-5xl font-semibold leading-[1.04] tracking-[-0.06em] text-[#234A36] sm:text-6xl lg:text-[74px]">
-          Make every resource <span className="text-[#9AAD75]">count.</span>
+          Make every resource <span className="text-[#3B6B38]">count.</span>
         </h1>
-        <p className="mt-6 max-w-[530px] text-lg leading-8 text-[#6A796E]">
+        <p className="mt-6 max-w-[530px] text-lg leading-8 text-[#445A4B]">
           Understand your environmental impact, uncover hidden inefficiencies, and discover smarter
           ways to save energy, reduce costs, and build a sustainable future.
         </p>
@@ -35,7 +35,7 @@ export function HeroSection() {
             <Play size={15} fill="currentColor" /> See how it works
           </Button>
         </div>
-        <p className="mt-4 text-xs text-[#89958B]">
+        <p className="mt-4 text-xs text-[#4D6253] font-medium">
           No account required · Frontend demonstration mode
         </p>
       </div>
@@ -46,7 +46,7 @@ export function HeroSection() {
           <div className="rounded-[21px] border border-white/70 bg-white/80 p-5 backdrop-blur-sm">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[.16em] text-[#859388]">
+                <p className="text-[10px] font-semibold uppercase tracking-[.16em] text-[#4D6253]">
                   Impact overview
                 </p>
                 <p className="mt-1 text-2xl font-semibold tracking-[-.04em] text-[#285943]">
@@ -60,26 +60,26 @@ export function HeroSection() {
 
             <div className="mt-5 grid grid-cols-3 gap-2">
               <div className="rounded-xl bg-[#F5F8F3] p-3">
-                <p className="text-[10px] text-[#88968A]">Emissions</p>
+                <p className="text-[10px] font-medium text-[#4D6253]">Emissions</p>
                 <p className="mt-2 text-lg font-semibold text-[#285943]">2.48t</p>
                 <MiniSpark />
               </div>
               <div className="rounded-xl bg-[#F5F8F3] p-3">
-                <p className="text-[10px] text-[#88968A]">Savings</p>
+                <p className="text-[10px] font-medium text-[#4D6253]">Savings</p>
                 <p className="mt-2 text-lg font-semibold text-[#285943]">₹6.8k</p>
-                <span className="text-[11px] font-medium text-[#4B8A63]">Estimated</span>
+                <span className="text-[11px] font-medium text-[#2E6B47]">Estimated</span>
               </div>
               <div className="rounded-xl bg-[#F5F8F3] p-3">
-                <p className="text-[10px] text-[#88968A]">Goal</p>
+                <p className="text-[10px] font-medium text-[#4D6253]">Goal</p>
                 <p className="mt-2 text-lg font-semibold text-[#285943]">34%</p>
-                <span className="text-[11px] font-medium text-[#4B8A63]">On track</span>
+                <span className="text-[11px] font-medium text-[#2E6B47]">On track</span>
               </div>
             </div>
 
             <div className="mt-5 rounded-xl border border-[#E4ECE1] bg-white p-4">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold text-[#4E6255]">Monthly emissions</p>
-                <span className="text-[10px] text-[#96A197]">kg CO₂e</span>
+                <p className="text-xs font-semibold text-[#3D5244]">Monthly emissions</p>
+                <span className="text-[10px] font-medium text-[#4D6253]">kg CO₂e</span>
               </div>
               <EmissionsLineChart data={DEFAULT_MONTHLY_EMISSIONS} height={132} showAxes={false} />
             </div>
@@ -90,9 +90,9 @@ export function HeroSection() {
               </span>
               <div>
                 <p className="text-xs font-medium">A little goes a long way</p>
-                <p className="mt-0.5 text-[10px] text-white/65">3 actions could save ~₹2,140 monthly</p>
+                <p className="mt-0.5 text-[10px] text-[#D5E5D3]">3 actions could save ~₹2,140 monthly</p>
               </div>
-              <ArrowRight size={15} className="ml-auto text-white/60" />
+              <ArrowRight size={15} className="ml-auto text-white/80" />
             </div>
           </div>
         </div>

@@ -9,7 +9,7 @@ export function LandingFooter() {
 
   return (
     <footer className="border-t border-[#E0E7DE] px-6 py-7">
-      <div className="mx-auto flex max-w-[1240px] flex-col justify-between gap-4 text-xs text-[#819086] sm:flex-row">
+      <div className="mx-auto flex max-w-[1240px] flex-col justify-between gap-4 text-xs text-[#4D6053] sm:flex-row">
         <Logo onClick={() => router.push('/')} />
         <span>CarbonIQ · A sustainability management platform for better everyday decisions.</span>
         <span>Demo data only · 2026</span>

@@ -20,8 +20,9 @@ export function CtaSection() {
           </h2>
         </div>
         <Button
+          variant="white"
           onClick={() => router.push('/dashboard')}
-          className="bg-white text-[#285943] hover:bg-[#F0F5ED]"
+          className="font-semibold text-[#285943] shadow-md px-6 py-3"
         >
           Explore demo <ArrowRight size={16} />
         </Button>

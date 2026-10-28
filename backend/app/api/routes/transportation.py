@@ -1,6 +1,11 @@
 from typing import Any, Dict, List
 from fastapi import APIRouter, Depends, Query, status
-from app.api.dependencies import get_current_user, get_current_workspace_id, get_db_dep
+from app.api.dependencies import (
+    get_current_user,
+    get_current_workspace_id,
+    get_db_dep,
+    require_transportation_access,
+)
 from app.schemas.transportation import (
     TransportationCreateRequest,
     TransportationRecordResponse,
@@ -16,7 +21,11 @@ from app.services.transportation_service import (
     update_transportation_record,
 )
 
-router = APIRouter(prefix="/transportation", tags=["Transportation Management"])
+router = APIRouter(
+    prefix="/transportation",
+    tags=["Transportation Management"],
+    dependencies=[Depends(require_transportation_access)],
+)
 
 
 @router.get("", response_model=List[TransportationRecordResponse])
