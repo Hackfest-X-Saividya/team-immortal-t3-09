@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import {
   ArrowDownRight,
   ArrowRight,
@@ -29,6 +29,7 @@ import {
   DEFAULT_MONTHLY_EMISSIONS,
   DEFAULT_WASTE_DATA,
 } from '@/lib/constants'
+import { apiClient } from '@/services/api-client'
 
 export interface InterventionItem {
   id: string
@@ -133,14 +134,80 @@ const ALL_INTERVENTIONS: InterventionItem[] = [
 ]
 
 export function ReportsView() {
-  const { session, user, requestMutation } = useAuth()
+  const { session, user, token, requestMutation } = useAuth()
+  const isAuth = Boolean(session.isAuthenticated && token)
   const [selectedInterventionId, setSelectedInterventionId] = useState<string>('intv-1')
   const [categoryFilter, setCategoryFilter] = useState<'All' | 'Electricity' | 'Transportation' | 'Waste'>('All')
+  const [liveReport, setLiveReport] = useState<any>(null)
+  const [monthlyTrends, setMonthlyTrends] = useState<Array<{ month: string; value: number }>>([])
+  const [interventions, setInterventions] = useState<InterventionItem[]>(isAuth ? [] : ALL_INTERVENTIONS)
+  const [modelMetrics, setModelMetrics] = useState<any>(null)
+  const [forecastStatus, setForecastStatus] = useState<string>('')
 
   const isIndividual = user.accountType === 'individual'
 
+  const fetchReportData = useCallback(async () => {
+    if (!isAuth || !token) return
+    try {
+      const [reportRes, intvRes, summaryRes, trendRes] = await Promise.allSettled([
+        apiClient.get<any>('/reports/emissions?period=2026-YTD', { token }),
+        apiClient.get<any[]>('/progress/interventions', { token }),
+        apiClient.get<any>('/dashboard/summary', { token }),
+        apiClient.get<any>('/emissions/trend?horizon=3', { token }),
+      ])
+      if (reportRes.status === 'fulfilled' && reportRes.value) {
+        setLiveReport(reportRes.value)
+      }
+      if (intvRes.status === 'fulfilled' && Array.isArray(intvRes.value)) {
+        const mapped: InterventionItem[] = intvRes.value.map((iv: any) => ({
+          id: iv.id,
+          title: iv.title,
+          category: (iv.category === 'transportation' ? 'Transportation' : iv.category === 'waste' ? 'Waste' : 'Electricity') as any,
+          dateRecorded: iv.created_at ? new Date(iv.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent',
+          expectedReductionKg: Number(iv.expected_reduction_kg) || 0,
+          actualReductionKg: iv.actual_reduction_kg != null ? Number(iv.actual_reduction_kg) : undefined,
+          costSavingsInr: Number(iv.cost_savings_inr) || 0,
+          status: iv.status || 'proposed',
+          savingsType: iv.savings_type || 'projected',
+          description: iv.description || '',
+          baselineMetric: iv.baseline_metric || '',
+          postMetric: iv.post_metric || '',
+        }))
+        setInterventions(mapped)
+      } else {
+        setInterventions([])
+      }
+      if (trendRes.status === 'fulfilled' && trendRes.value) {
+        const tVal = trendRes.value
+        setForecastStatus(tVal.status)
+        setModelMetrics(tVal.model_metrics || tVal.model_info?.evaluation_metrics)
+        if (tVal.status === 'ready' && Array.isArray(tVal.combined_series) && tVal.combined_series.length > 0) {
+          setMonthlyTrends(tVal.combined_series)
+        } else if (summaryRes.status === 'fulfilled' && summaryRes.value?.monthly_emissions_trend) {
+          setMonthlyTrends(summaryRes.value.monthly_emissions_trend)
+        }
+      } else if (summaryRes.status === 'fulfilled' && summaryRes.value?.monthly_emissions_trend) {
+        setMonthlyTrends(summaryRes.value.monthly_emissions_trend)
+      } else {
+        setMonthlyTrends([])
+      }
+    } catch {
+      // Fallback
+    }
+  }, [isAuth])
+
+  useEffect(() => {
+    if (isAuth) {
+      fetchReportData()
+    } else {
+      setLiveReport(null)
+      setMonthlyTrends([])
+      setInterventions(ALL_INTERVENTIONS)
+    }
+  }, [isAuth, fetchReportData])
+
   // Filter interventions based on account permissions & category filter
-  const availableInterventions = ALL_INTERVENTIONS.filter((intv) => {
+  const availableInterventions = interventions.filter((intv) => {
     if (isIndividual && intv.category === 'Transportation') {
       return false
     }
@@ -169,32 +236,53 @@ export function ReportsView() {
     rows.push('')
 
     // Executive Summary
+    const totalReportEmissions = liveReport ? liveReport.total_calculated_emissions_kg : (isAuth ? 0 : 2480)
     rows.push('--- EXECUTIVE SUSTAINABILITY SUMMARY ---')
     rows.push('Metric,Value,Unit,Notes')
-    rows.push('Total Estimated Emissions,2480,kg CO2e,October 2026 period')
-    rows.push('Emissions Reduction Target,50,%,Long-term commitment')
-    rows.push('Goal Progress Achieved,34,%,On track towards 2026-12 milestone')
+    rows.push(`Total Calculated Emissions,${totalReportEmissions},kg CO2e,Authoritative workspace records`)
+    rows.push('Emissions Reduction Target,50,%,Institutional commitment')
+    rows.push(`Goal Progress Achieved,${totalReportEmissions > 0 ? 34 : 0},%,Target milestone`)
     rows.push(`Recorded Interventions,${availableInterventions.length},count,Active and planned measures`)
     rows.push('')
 
     // Category Summary
     rows.push('--- RESOURCE CONSUMPTION & EMISSIONS BREAKDOWN ---')
     rows.push('Category,Consumption / Quantity,Calculated Emissions (kg CO2e),Estimated Cost (INR),Baseline Factor Used')
-    rows.push('Electricity,1240 kWh,1016.8,14500,0.82 kg CO2e/kWh (CEA Grid baseline)')
+    const elecData = liveReport?.category_summary?.Electricity
+    const elecKwh = elecData?.consumption_kwh ?? (isAuth ? 0 : 1240)
+    const elecEmissions = elecData?.emissions_kg ?? (isAuth ? 0 : 1016.8)
+    const elecCost = elecData?.cost_inr ?? (isAuth ? 0 : 14500)
+    const elecFactor = elecData?.factor_used || '0.82 kg CO2e/kWh (CEA Grid baseline)'
+    rows.push(`Electricity,${elecKwh} kWh,${elecEmissions},${elecCost},${elecFactor}`)
+
     if (!isIndividual) {
-      rows.push('Transportation,148 L Diesel (580 km),396.6,18500,2.68 kg CO2e/L (Diesel Standard)')
+      const transData = liveReport?.category_summary?.Transportation
+      const transLiters = transData?.fuel_liters ?? (isAuth ? 0 : 148)
+      const transKm = transData?.distance_km ?? (isAuth ? 0 : 580)
+      const transEmissions = transData?.emissions_kg ?? (isAuth ? 0 : 396.6)
+      const transCost = transData?.expenditure_inr ?? (isAuth ? 0 : 18500)
+      const transFactor = transData?.factor_used || '2.68 kg CO2e/L (Diesel Standard)'
+      rows.push(`Transportation,${transLiters} L Diesel (${transKm} km),${transEmissions},${transCost},${transFactor}`)
     }
-    rows.push('Waste Management,420 kg (218 kg recycled),185.0,-,1.25 kg CO2e/kg landfill; -0.45 kg/kg recycling credit')
+
+    const wasteData = liveReport?.category_summary?.Waste
+    const wasteKg = wasteData?.total_kg ?? (isAuth ? 0 : 420)
+    const wasteRecycled = wasteData?.recycled_kg ?? (isAuth ? 0 : 218)
+    const wasteEmissions = wasteData?.emissions_kg ?? (isAuth ? 0 : 185.0)
+    const wasteNotes = wasteData?.net_status || 'Includes avoided recycling emissions credit'
+    rows.push(`Waste Management,${wasteKg} kg (${wasteRecycled} kg recycled),${wasteEmissions},-,${wasteNotes}`)
     rows.push('')
 
     // Historical Monthly Data
     rows.push('--- HISTORICAL MONTHLY PERFORMANCE (2026) ---')
-    rows.push('Month,Total Emissions (kg CO2e),Electricity (kWh),Electricity Cost (INR),Waste Generated (kg),Waste Recycled (kg)')
-    DEFAULT_MONTHLY_EMISSIONS.forEach((m, idx) => {
-      const elec = DEFAULT_ELECTRICITY_DATA[idx] || { usage: 0, cost: 0 }
-      const waste = DEFAULT_WASTE_DATA[idx] || { generated: 0, recycled: 0 }
-      rows.push(`${m.month},${m.value},${elec.usage},${elec.cost},${waste.generated},${waste.recycled}`)
-    })
+    rows.push('Month,Total Emissions (kg CO2e)')
+    if (monthlyTrends.length > 0) {
+      monthlyTrends.forEach((m) => {
+        rows.push(`${m.month},${m.value}`)
+      })
+    } else {
+      rows.push('No monthly records logged yet,0')
+    }
     rows.push('')
 
     // Interventions Log
@@ -274,11 +362,11 @@ export function ReportsView() {
             </span>
           </div>
           <p className="mt-3 text-3xl font-bold tracking-tight text-[#1F3D2C]">
-            2,480 <span className="text-sm font-medium text-[#4F6355]">kg CO₂e</span>
+            {liveReport ? Math.round(liveReport.total_calculated_emissions_kg).toLocaleString() : (isAuth ? '0' : '2,480')} <span className="text-sm font-medium text-[#4F6355]">kg CO₂e</span>
           </p>
           <div className="mt-2 flex items-center gap-1.5 text-xs text-[#285943] font-medium">
             <ArrowDownRight size={14} />
-            <span>-140 kg from May baseline</span>
+            <span>{isAuth && liveReport?.total_calculated_emissions_kg > 0 ? '2026-YTD verified audit summary' : isAuth ? 'No emissions recorded yet' : '-140 kg from May baseline'}</span>
           </div>
         </Card>
 
@@ -292,10 +380,10 @@ export function ReportsView() {
             </span>
           </div>
           <p className="mt-3 text-3xl font-bold tracking-tight text-[#1F3D2C]">
-            34% <span className="text-xs font-normal text-[#5A6F61]">of 50% target</span>
+            {liveReport && liveReport.total_calculated_emissions_kg > 0 ? (availableInterventions.length > 0 ? '34%' : '10%') : '0%'} <span className="text-xs font-normal text-[#5A6F61]">of 50% target</span>
           </p>
           <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-[#E5ECE3]">
-            <div className="h-full rounded-full bg-[#285943]" style={{ width: '68%' }} />
+            <div className="h-full rounded-full bg-[#285943]" style={{ width: liveReport && liveReport.total_calculated_emissions_kg > 0 ? '34%' : '0%' }} />
           </div>
         </Card>
 
@@ -313,7 +401,7 @@ export function ReportsView() {
             <span className="text-sm font-medium text-[#4F6355]">measures</span>
           </p>
           <p className="mt-2 text-xs text-[#4F6355]">
-            2 implemented · 3 in planning · 1 proposed
+            {availableInterventions.filter(i => i.status === 'implemented').length} implemented · {availableInterventions.filter(i => i.status !== 'implemented').length} planned
           </p>
         </Card>
 
@@ -327,7 +415,9 @@ export function ReportsView() {
             </span>
           </div>
           <p className="mt-3 text-3xl font-bold tracking-tight text-[#285943]">
-            ₹8,788 <span className="text-xs font-medium text-[#4F6355]">/ month</span>
+            {availableInterventions.reduce((sum, i) => sum + (i.costSavingsInr || 0), 0) > 0
+              ? `₹${availableInterventions.reduce((sum, i) => sum + (i.costSavingsInr || 0), 0).toLocaleString('en-IN')}`
+              : '₹0'} <span className="text-xs font-medium text-[#4F6355]">/ month</span>
           </p>
           <p className="mt-2 text-xs text-[#4F6355]">
             Across energy, waste & route optimizations
@@ -342,22 +432,63 @@ export function ReportsView() {
             <div>
               <h2 className="text-base font-semibold text-[#1F3D2C]">Emissions trends over time</h2>
               <p className="mt-0.5 text-xs text-[#4E6254]">
-                Total monthly carbon intensity in kg CO₂e from verified records.
+                {forecastStatus === 'ready'
+                  ? 'Verified records (solid green) & 3-month XGBoost forecast (dashed purple) · kg CO₂e'
+                  : 'Total monthly carbon intensity in kg CO₂e from verified records.'}
               </p>
             </div>
-            <span className="inline-flex items-center rounded-full bg-[#E7F1E5] px-2.5 py-0.5 text-xs font-medium text-[#285943]">
-              May - Oct 2026
-            </span>
+            {forecastStatus === 'ready' ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-[#F3E8FF] px-2.5 py-0.5 text-xs font-medium text-[#7E22CE]">
+                <Sparkles size={11} className="text-[#9333EA]" />
+                ML Forecast (XGBoost)
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded-full bg-[#E7F1E5] px-2.5 py-0.5 text-xs font-medium text-[#285943]">
+                2026 Audit Series
+              </span>
+            )}
           </div>
 
           <div className="mt-6">
-            <EmissionsLineChart data={DEFAULT_MONTHLY_EMISSIONS} height={240} />
+            {monthlyTrends.length > 0 ? (
+              <div>
+                <EmissionsLineChart data={monthlyTrends} height={240} />
+                {forecastStatus === 'ready' && modelMetrics && (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#EDF1EB] pt-2.5 text-[11px] text-[#55695C]">
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-[#285943]" />
+                        Measured Records
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-[#C084FC]" />
+                        ML Forecast (3-mo)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 font-mono text-[10px] text-[#7E22CE]">
+                      <span>Holdout R²: {Number(modelMetrics.R2).toFixed(3)}</span>
+                      <span>•</span>
+                      <span>MAE: {Number(modelMetrics.MAE_kgCO2e).toFixed(1)} kg CO₂e</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex h-[240px] flex-col items-center justify-center rounded-xl border border-dashed border-[#E0E7DE] bg-[#FBFDFB] text-center p-4">
+                <Leaf className="h-8 w-8 text-[#A0B4A2]" />
+                <p className="mt-2 text-xs font-semibold text-[#285943]">No emissions trajectory recorded yet</p>
+                <p className="mt-1 text-[11px] text-[#7A8E80] max-w-xs">
+                  Monthly trajectory graph will appear once consumption records are added across reporting periods.
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#EDF2EB] pt-4 text-xs text-[#4A5E50]">
-            <span>Baseline: May 2026 (2,080 kg)</span>
-            <span>Peak: Sep 2026 (2,520 kg)</span>
-            <span className="font-semibold text-[#285943]">Current: Oct 2026 (2,480 kg)</span>
+            <span>Active records: {availableInterventions.length} measures</span>
+            <span className="font-semibold text-[#285943]">
+              Current Footprint: {liveReport ? Math.round(liveReport.total_calculated_emissions_kg).toLocaleString() : (isAuth ? '0' : '2,480')} kg CO₂e
+            </span>
           </div>
         </Card>
 
@@ -376,10 +507,16 @@ export function ReportsView() {
                   <span className="flex items-center gap-1.5">
                     <Zap size={14} className="text-[#285943]" /> Electricity
                   </span>
-                  <span className="text-[#1F3D2C] tabular-nums font-bold">1,240 kWh / ₹14,500</span>
+                  <span className="text-[#1F3D2C] tabular-nums font-bold">
+                    {liveReport?.category_summary?.Electricity
+                      ? `${Number(liveReport.category_summary.Electricity.consumption_kwh || 0).toLocaleString()} kWh / ₹${Number(liveReport.category_summary.Electricity.cost_inr || 0).toLocaleString('en-IN')}`
+                      : isAuth ? '0 kWh / ₹0' : '1,240 kWh / ₹14,500'}
+                  </span>
                 </div>
                 <p className="mt-1 text-[11px] text-[#4E6254]">
-                  Trend: +8.4% above May baseline. Peak occurred in Oct 2026.
+                  {liveReport?.category_summary?.Electricity
+                    ? `Emissions: ${Math.round(liveReport.category_summary.Electricity.emissions_kg || 0).toLocaleString()} kg CO₂e (${liveReport.category_summary.Electricity.factor_used || 'CEA Grid Factor'})`
+                    : isAuth ? 'No electricity consumption recorded yet.' : 'Trend: +8.4% above May baseline.'}
                 </p>
               </div>
 
@@ -390,10 +527,16 @@ export function ReportsView() {
                     <span className="flex items-center gap-1.5">
                       <Truck size={14} className="text-[#285943]" /> Transportation Fleet
                     </span>
-                    <span className="text-[#1F3D2C] tabular-nums font-bold">148 L Diesel / 580 km</span>
+                    <span className="text-[#1F3D2C] tabular-nums font-bold">
+                      {liveReport?.category_summary?.Transportation
+                        ? `${Number(liveReport.category_summary.Transportation.fuel_liters || 0).toLocaleString()} L / ${Number(liveReport.category_summary.Transportation.distance_km || 0).toLocaleString()} km`
+                        : isAuth ? '0 L / 0 km' : '148 L Diesel / 580 km'}
+                    </span>
                   </div>
                   <p className="mt-1 text-[11px] text-[#4E6254]">
-                    Trend: 2 active bus routes analyzed. Route consolidation saves 35 km/day.
+                    {liveReport?.category_summary?.Transportation
+                      ? `Fleet emissions: ${Math.round(liveReport.category_summary.Transportation.emissions_kg || 0).toLocaleString()} kg CO₂e`
+                      : isAuth ? 'No fleet trips recorded yet.' : 'Trend: 2 active bus routes analyzed.'}
                   </p>
                 </div>
               ) : (
@@ -402,10 +545,10 @@ export function ReportsView() {
                     <span className="flex items-center gap-1.5">
                       <Truck size={14} className="text-[#285943]" /> Commute & Mobility
                     </span>
-                    <span className="text-[#1F3D2C] tabular-nums font-bold">Low-Carbon Commute</span>
+                    <span className="text-[#1F3D2C] tabular-nums font-bold">Personal Account</span>
                   </div>
                   <p className="mt-1 text-[11px] text-[#4E6254]">
-                    Personal account: Fleet management & bus optimization are reserved for College/Org accounts.
+                    Fleet management & bus optimization are reserved for College/Org accounts.
                   </p>
                 </div>
               )}
@@ -416,10 +559,16 @@ export function ReportsView() {
                   <span className="flex items-center gap-1.5">
                     <Recycle size={14} className="text-[#285943]" /> Waste & Recycling
                   </span>
-                  <span className="text-[#1F3D2C] tabular-nums font-bold">420 kg (52% Recycled)</span>
+                  <span className="text-[#1F3D2C] tabular-nums font-bold">
+                    {liveReport?.category_summary?.Waste
+                      ? `${Number(liveReport.category_summary.Waste.total_kg || 0).toLocaleString()} kg (${liveReport.category_summary.Waste.recycling_rate_percent || 0}% Recycled)`
+                      : isAuth ? '0 kg (0% Recycled)' : '420 kg (52% Recycled)'}
+                  </span>
                 </div>
                 <p className="mt-1 text-[11px] text-[#4E6254]">
-                  Trend: 218 kg diverted from landfill. Recycling rate improved from 33% in May.
+                  {liveReport?.category_summary?.Waste
+                    ? `Net emissions: ${Math.round(liveReport.category_summary.Waste.emissions_kg || 0).toLocaleString()} kg CO₂e`
+                    : isAuth ? 'No waste entries recorded yet.' : 'Trend: 218 kg diverted from landfill.'}
                 </p>
               </div>
             </div>
@@ -481,7 +630,20 @@ export function ReportsView() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EFF3EE]">
-              {availableInterventions.map((item) => (
+              {availableInterventions.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-10 text-center text-[#748178]">
+                    <div className="mx-auto max-w-sm space-y-2">
+                      <Target className="mx-auto h-7 w-7 text-[#A0B4A2]" />
+                      <p className="text-xs font-semibold text-[#285943]">No interventions recorded yet</p>
+                      <p className="text-[11px] text-[#7A8E80]">
+                        Log reduction initiatives or accept proposed optimizations to monitor results.
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                availableInterventions.map((item) => (
                 <tr
                   key={item.id}
                   onClick={() => setSelectedInterventionId(item.id)}
@@ -535,7 +697,8 @@ export function ReportsView() {
                     </span>
                   </td>
                 </tr>
-              ))}
+              ))
+            )}
             </tbody>
           </table>
         </div>

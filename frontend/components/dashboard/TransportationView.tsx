@@ -19,6 +19,7 @@ import {
   Route,
   Sparkles,
   Trash2,
+  Truck,
   Users,
   Wallet,
 } from 'lucide-react'
@@ -38,6 +39,7 @@ import {
   calculateTransportationEmissions,
   generateBusRouteOptimizations,
 } from '@/lib/calculations'
+import { apiClient } from '@/services/api-client'
 import { aiAdvisorsService } from '@/services/ai-advisors.service'
 import type {
   BusRoute,
@@ -189,13 +191,14 @@ const INITIAL_BUS_ROUTES: BusRoute[] = [
 ]
 
 export function TransportationView() {
-  const { requestMutation } = useAuth()
+  const { session, user, token, requestMutation } = useAuth()
+  const isAuth = Boolean(session.isAuthenticated && token)
   const optimizationSectionRef = useRef<HTMLDivElement>(null)
 
-  const [records, setRecords] = useState<TransportationRecord[]>(INITIAL_TRANSPORT_RECORDS)
-  const [routes, setRoutes] = useState<BusRoute[]>(INITIAL_BUS_ROUTES)
-  const [proposals, setProposals] = useState<RouteOptimizationProposal[]>(() =>
-    generateBusRouteOptimizations(INITIAL_BUS_ROUTES)
+  const [records, setRecords] = useState<TransportationRecord[]>(isAuth ? [] : INITIAL_TRANSPORT_RECORDS)
+  const [routes, setRoutes] = useState<BusRoute[]>(isAuth ? [] : INITIAL_BUS_ROUTES)
+  const [proposals, setProposals] = useState<RouteOptimizationProposal[]>(
+    isAuth ? [] : generateBusRouteOptimizations(INITIAL_BUS_ROUTES)
   )
 
   const [isRecordModalOpen, setIsRecordModalOpen] = useState(false)
@@ -209,6 +212,82 @@ export function TransportationView() {
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+
+  const fetchTransportationData = React.useCallback(async () => {
+    if (!isAuth || !token) return
+    try {
+      const [recordsRes, routesRes] = await Promise.allSettled([
+        apiClient.get<any[]>('/transportation', { token }),
+        apiClient.get<any[]>('/transportation/routes', { token }),
+      ])
+
+      if (recordsRes.status === 'fulfilled' && Array.isArray(recordsRes.value)) {
+        setRecords(
+          recordsRes.value.map((raw: any) => ({
+            id: raw.id,
+            date: raw.date || raw.reporting_period || '2026-10-28',
+            mode: raw.mode || 'Bus',
+            distanceKm: Number(raw.distance_km) || 0,
+            fuelType: raw.fuel_type || 'Diesel',
+            fuelConsumedLiters: raw.fuel_consumed_liters != null ? Number(raw.fuel_consumed_liters) : undefined,
+            fuelEfficiencyKmPerL: raw.fuel_efficiency_km_per_l != null ? Number(raw.fuel_efficiency_km_per_l) : undefined,
+            fuelExpenditureInr: raw.fuel_expenditure_inr != null ? Number(raw.fuel_expenditure_inr) : undefined,
+            vehicleId: raw.vehicle_id,
+            passengerCount: raw.passenger_count != null ? Number(raw.passenger_count) : undefined,
+            vehicleCapacity: raw.vehicle_capacity != null ? Number(raw.vehicle_capacity) : undefined,
+            routeName: raw.route_name,
+            pickupLocations: raw.pickup_locations,
+            destination: raw.destination,
+            notes: raw.notes,
+            calculationMethod: raw.calculation_method || 'actual_fuel',
+            calculatedEmissionsKg: Number(raw.calculated_emissions_kg) || 0,
+            factorSource: raw.factor_source,
+            factorVersion: raw.factor_version,
+            calculationBoundary: raw.calculation_boundary,
+            createdAt: raw.created_at || new Date().toISOString(),
+          }))
+        )
+      }
+
+      if (routesRes.status === 'fulfilled' && Array.isArray(routesRes.value)) {
+        const loadedRoutes: BusRoute[] = routesRes.value.map((raw: any) => ({
+          id: raw.id,
+          routeName: raw.route_name,
+          startLocation: raw.start_location,
+          destination: raw.destination,
+          intermediateStops: raw.intermediate_stops || [],
+          distanceKm: Number(raw.distance_km) || 0,
+          durationMinutes: Number(raw.duration_minutes) || 0,
+          tripsPerDay: Number(raw.trips_per_day) || 1,
+          operatingDaysPerWeek: Number(raw.operating_days_per_week) || 5,
+          assignedStudents: Number(raw.assigned_students) || 0,
+          busId: raw.bus_id || 'BUS-01',
+          fuelType: raw.fuel_type || 'Diesel',
+          fuelEfficiencyKmPerL: Number(raw.fuel_efficiency_km_per_l) || 5.0,
+          seatingCapacity: Number(raw.seating_capacity) || 40,
+          currentBusesCount: Number(raw.current_buses_count) || 1,
+          status: raw.status || 'active',
+          notes: raw.notes,
+        }))
+        setRoutes(loadedRoutes)
+        if (loadedRoutes.length > 0) {
+          setProposals(generateBusRouteOptimizations(loadedRoutes))
+        }
+      }
+    } catch (err: any) {
+      console.error('Failed to fetch transportation data:', err)
+    }
+  }, [isAuth])
+
+  React.useEffect(() => {
+    if (isAuth) {
+      fetchTransportationData()
+    } else {
+      setRecords(INITIAL_TRANSPORT_RECORDS)
+      setRoutes(INITIAL_BUS_ROUTES)
+      setProposals(generateBusRouteOptimizations(INITIAL_BUS_ROUTES))
+    }
+  }, [isAuth, fetchTransportationData])
 
   // Aggregated metrics from records
   const totalDistanceKm = useMemo(
@@ -255,30 +334,70 @@ export function TransportationView() {
     setActiveMenuId(null)
   }
 
-  const handleDeleteRecord = (id: string) => {
+  const handleDeleteRecord = async (id: string) => {
     if (!requestMutation('delete transportation records')) return
-    setRecords((prev) => prev.filter((r) => r.id !== id))
+    if (isAuth) {
+      try {
+        await apiClient.delete(`/transportation/${id}`)
+        setToastMessage('Travel record removed from database.')
+        await fetchTransportationData()
+      } catch (err: any) {
+        setToastMessage(err.message || 'Failed to remove transportation record.')
+      }
+    } else {
+      setRecords((prev) => prev.filter((r) => r.id !== id))
+      setToastMessage('Travel record removed from workspace.')
+    }
     setActiveMenuId(null)
-    setToastMessage('Travel record removed from workspace.')
   }
 
-  const handleSaveRecord = (
+  const handleSaveRecord = async (
     data: Omit<TransportationRecord, 'id' | 'createdAt'>,
     existingId?: string
   ) => {
-    if (existingId) {
-      setRecords((prev) =>
-        prev.map((r) => (r.id === existingId ? { ...r, ...data } : r))
-      )
-      setToastMessage('Travel record updated successfully.')
-    } else {
-      const newRec: TransportationRecord = {
-        ...data,
-        id: `tr-${Date.now()}`,
-        createdAt: new Date().toISOString(),
+    if (isAuth) {
+      try {
+        const payload = {
+          date: data.date,
+          mode: data.mode,
+          distance_km: data.distanceKm,
+          fuel_type: data.fuelType || 'Diesel',
+          fuel_consumed_liters: data.fuelConsumedLiters,
+          fuel_efficiency_km_per_l: data.fuelEfficiencyKmPerL,
+          fuel_expenditure_inr: data.fuelExpenditureInr,
+          vehicle_id: data.vehicleId,
+          passenger_count: data.passengerCount,
+          vehicle_capacity: data.vehicleCapacity,
+          route_name: data.routeName,
+          destination: data.destination,
+          notes: data.notes,
+        }
+        if (existingId) {
+          await apiClient.put(`/transportation/${existingId}`, payload)
+          setToastMessage('Transportation record updated in database.')
+        } else {
+          await apiClient.post('/transportation', payload)
+          setToastMessage('Transportation record saved to database.')
+        }
+        await fetchTransportationData()
+      } catch (err: any) {
+        setToastMessage(err.message || 'Failed to save transportation record.')
       }
-      setRecords((prev) => [newRec, ...prev])
-      setToastMessage('Transportation entry saved to workspace.')
+    } else {
+      if (existingId) {
+        setRecords((prev) =>
+          prev.map((r) => (r.id === existingId ? { ...r, ...data } : r))
+        )
+        setToastMessage('Travel record updated successfully.')
+      } else {
+        const newRec: TransportationRecord = {
+          ...data,
+          id: `tr-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+        }
+        setRecords((prev) => [newRec, ...prev])
+        setToastMessage('Transportation entry saved to workspace.')
+      }
     }
   }
 
@@ -295,32 +414,124 @@ export function TransportationView() {
     setIsRouteModalOpen(true)
   }
 
-  const handleDeleteRoute = (id: string) => {
+  const handleDeleteRoute = async (id: string) => {
     if (!requestMutation('delete bus routes')) return
-    const updated = routes.filter((r) => r.id !== id)
-    setRoutes(updated)
-    setProposals(generateBusRouteOptimizations(updated))
-    setToastMessage('Bus route deleted.')
-  }
-
-  const handleSaveRoute = (data: Omit<BusRoute, 'id'>, existingId?: string) => {
-    let updatedRoutes: BusRoute[]
-    if (existingId) {
-      updatedRoutes = routes.map((r) => (r.id === existingId ? { ...r, ...data } : r))
-      setToastMessage('Bus route updated successfully.')
-    } else {
-      const newRt: BusRoute = {
-        ...data,
-        id: `route-${Date.now()}`,
+    if (isAuth) {
+      try {
+        await apiClient.delete(`/transportation/routes/${id}`)
+        setToastMessage('Bus route deleted from database.')
+        await fetchTransportationData()
+      } catch (err: any) {
+        setToastMessage(err.message || 'Failed to delete bus route.')
       }
-      updatedRoutes = [...routes, newRt]
-      setToastMessage('New bus route configured and added.')
+    } else {
+      const updated = routes.filter((r) => r.id !== id)
+      setRoutes(updated)
+      setProposals(generateBusRouteOptimizations(updated))
+      setToastMessage('Bus route deleted.')
     }
-    setRoutes(updatedRoutes)
-    setProposals(generateBusRouteOptimizations(updatedRoutes))
   }
 
-  const handleRunOptimizer = () => {
+  const handleSaveRoute = async (data: Omit<BusRoute, 'id'>, existingId?: string) => {
+    if (isAuth) {
+      try {
+        const payload = {
+          route_name: data.routeName,
+          start_location: data.startLocation,
+          destination: data.destination,
+          intermediate_stops: data.intermediateStops,
+          distance_km: data.distanceKm,
+          duration_minutes: data.durationMinutes,
+          trips_per_day: data.tripsPerDay,
+          operating_days_per_week: data.operatingDaysPerWeek,
+          assigned_students: data.assignedStudents,
+          bus_id: data.busId,
+          fuel_type: data.fuelType,
+          fuel_efficiency_km_per_l: data.fuelEfficiencyKmPerL,
+          seating_capacity: data.seatingCapacity,
+          current_buses_count: data.currentBusesCount,
+          status: data.status,
+          notes: data.notes,
+        }
+        if (existingId) {
+          await apiClient.put(`/transportation/routes/${existingId}`, payload)
+          setToastMessage('Bus route updated in database.')
+        } else {
+          await apiClient.post('/transportation/routes', payload)
+          setToastMessage('New bus route configured and saved to database.')
+        }
+        await fetchTransportationData()
+      } catch (err: any) {
+        setToastMessage(err.message || 'Failed to save bus route.')
+      }
+    } else {
+      let updatedRoutes: BusRoute[]
+      if (existingId) {
+        updatedRoutes = routes.map((r) => (r.id === existingId ? { ...r, ...data } : r))
+        setToastMessage('Bus route updated successfully.')
+      } else {
+        const newRt: BusRoute = {
+          ...data,
+          id: `route-${Date.now()}`,
+        }
+        updatedRoutes = [...routes, newRt]
+        setToastMessage('New bus route configured and added.')
+      }
+      setRoutes(updatedRoutes)
+      setProposals(generateBusRouteOptimizations(updatedRoutes))
+    }
+  }
+
+  const handleRunOptimizer = async () => {
+    if (isAuth) {
+      try {
+        const res = await apiClient.post<any>('/transportation/optimize')
+        if (res && Array.isArray(res.proposals) && res.proposals.length > 0) {
+          const mapped: RouteOptimizationProposal[] = res.proposals.map((p: any) => ({
+            id: p.id,
+            title: p.title,
+            summary: p.summary,
+            reason: p.reason,
+            capacityCheckPassed: p.capacity_check_passed,
+            currentConfig: {
+              routeIds: p.current_config?.route_ids || [],
+              routeNames: p.current_config?.route_names || [],
+              busesCount: p.current_config?.buses_count || 1,
+              studentsServed: p.current_config?.students_served || 0,
+              totalDistanceKm: p.current_config?.total_distance_km || 0,
+              dailyFuelConsumptionLiters: p.current_config?.daily_fuel_consumption_liters || 0,
+              monthlyFuelCostInr: p.current_config?.monthly_fuel_cost_inr || 0,
+              monthlyEmissionsKg: p.current_config?.monthly_emissions_kg || 0,
+            },
+            proposedConfig: {
+              routeIds: p.proposed_config?.route_ids || [],
+              routeNames: p.proposed_config?.route_names || [],
+              busesCount: p.proposed_config?.buses_count || 1,
+              studentsServed: p.proposed_config?.students_served || 0,
+              totalDistanceKm: p.proposed_config?.total_distance_km || 0,
+              dailyFuelConsumptionLiters: p.proposed_config?.daily_fuel_consumption_liters || 0,
+              monthlyFuelCostInr: p.proposed_config?.monthly_fuel_cost_inr || 0,
+              monthlyEmissionsKg: p.proposed_config?.monthly_emissions_kg || 0,
+            },
+            estimatedDistanceReductionKm: p.estimated_distance_reduction_km || 0,
+            estimatedFuelSavingsLiters: p.estimated_fuel_savings_liters || 0,
+            estimatedMonthlySavingsInr: p.estimated_monthly_savings_inr || 0,
+            estimatedEmissionsReductionKg: p.estimated_emissions_reduction_kg || 0,
+            feasibility: p.feasibility || 'High',
+            requiredValidation: p.required_validation || [],
+            status: p.status || 'pending',
+          }))
+          setProposals(mapped)
+          setToastMessage(
+            `Optimization completed: ${mapped.length} consolidation candidate identified from backend.`
+          )
+          return
+        }
+      } catch (err: any) {
+        console.warn('Backend route optimizer returned error, using verified client optimizer:', err)
+      }
+    }
+
     const updated = generateBusRouteOptimizations(routes)
     setProposals(updated)
     if (updated.length > 0) {
@@ -334,7 +545,49 @@ export function TransportationView() {
     }
   }
 
-  const handleAcceptProposal = (proposalId: string) => {
+  const handleAcceptProposal = async (proposalId: string) => {
+    const proposal = proposals.find((p) => p.id === proposalId)
+    if (isAuth && proposal) {
+      try {
+        await apiClient.post('/transportation/optimize/accept', {
+          id: proposal.id,
+          title: proposal.title,
+          summary: proposal.summary,
+          reason: proposal.reason,
+          capacity_check_passed: proposal.capacityCheckPassed,
+          current_config: {
+            route_ids: proposal.currentConfig.routeIds,
+            route_names: proposal.currentConfig.routeNames,
+            buses_count: proposal.currentConfig.busesCount,
+            students_served: proposal.currentConfig.studentsServed,
+            total_distance_km: proposal.currentConfig.totalDistanceKm,
+            daily_fuel_consumption_liters: proposal.currentConfig.dailyFuelConsumptionLiters,
+            monthly_fuel_cost_inr: proposal.currentConfig.monthlyFuelCostInr,
+            monthly_emissions_kg: proposal.currentConfig.monthlyEmissionsKg,
+          },
+          proposed_config: {
+            route_ids: proposal.proposedConfig.routeIds,
+            route_names: proposal.proposedConfig.routeNames,
+            buses_count: proposal.proposedConfig.busesCount,
+            students_served: proposal.proposedConfig.studentsServed,
+            total_distance_km: proposal.proposedConfig.totalDistanceKm,
+            daily_fuel_consumption_liters: proposal.proposedConfig.dailyFuelConsumptionLiters,
+            monthly_fuel_cost_inr: proposal.proposedConfig.monthlyFuelCostInr,
+            monthly_emissions_kg: proposal.proposedConfig.monthlyEmissionsKg,
+          },
+          estimated_distance_reduction_km: proposal.estimatedDistanceReductionKm,
+          estimated_fuel_savings_liters: proposal.estimatedFuelSavingsLiters,
+          estimated_monthly_savings_inr: proposal.estimatedMonthlySavingsInr,
+          estimated_emissions_reduction_kg: proposal.estimatedEmissionsReductionKg,
+          feasibility: proposal.feasibility,
+          required_validation: proposal.requiredValidation,
+          status: 'accepted',
+        })
+      } catch (err) {
+        console.warn('Failed to record intervention on backend:', err)
+      }
+    }
+
     setProposals((prev) =>
       prev.map((p) =>
         p.id === proposalId ? { ...p, status: 'accepted' as const } : p
@@ -441,7 +694,20 @@ export function TransportationView() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EFF3EE] text-[#55675A]">
-              {records.map((rec) => (
+              {records.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-12 text-center text-[#748178]">
+                    <div className="mx-auto max-w-sm space-y-2">
+                      <Truck className="mx-auto h-8 w-8 text-[#A0B4A2]" />
+                      <p className="text-sm font-semibold text-[#285943]">No transportation logs found</p>
+                      <p className="text-xs text-[#7A8E80]">
+                        Click &ldquo;New travel log&rdquo; above to record vehicle trips, fuel usage, and transit distances.
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                records.map((rec) => (
                 <tr key={rec.id} className="hover:bg-[#FAFDF9]">
                   <td className="py-3 font-medium text-[#2F4436]">{rec.date}</td>
                   <td className="py-3">
@@ -506,7 +772,8 @@ export function TransportationView() {
                     </div>
                   </td>
                 </tr>
-              ))}
+              ))
+              )}
             </tbody>
           </table>
         </div>
@@ -561,7 +828,26 @@ export function TransportationView() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#EFF3EE] text-[#55675A]">
-                {routes.map((rt) => {
+                {routes.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="py-12 text-center text-[#748178]">
+                      <div className="mx-auto max-w-sm space-y-2">
+                        <Bus className="mx-auto h-8 w-8 text-[#A0B4A2]" />
+                        <p className="text-sm font-semibold text-[#285943]">
+                          {user?.accountType === 'individual'
+                            ? 'Restricted to College & Organization accounts'
+                            : 'No bus routes configured'}
+                        </p>
+                        <p className="text-xs text-[#7A8E80]">
+                          {user?.accountType === 'individual'
+                            ? 'Bus fleet management and multi-stop route optimization are designed for institutional fleet operations.'
+                            : 'Click \u201CAdd Route\u201D above to register transit lines, student demand, and vehicle efficiencies.'}
+                        </p>
+                      </div>
+                    </td>
+                  </tr>
+                ) : (
+                  routes.map((rt) => {
                   const occupancyPct = Math.round((rt.assignedStudents / rt.seatingCapacity) * 100)
                   return (
                     <tr key={rt.id} className="hover:bg-[#FAFDF9]">
@@ -614,7 +900,8 @@ export function TransportationView() {
                       </td>
                     </tr>
                   )
-                })}
+                })
+                )}
               </tbody>
             </table>
           </div>
@@ -741,6 +1028,7 @@ export function TransportationView() {
 
       {/* AI Transport Advisor Section */}
       <ModuleAiAdvisor
+        category="transportation"
         title="AI Transport Advisor"
         subtitle="Ask questions about travel patterns, fuel usage, student transportation, and route optimization."
         suggestedQuestions={[

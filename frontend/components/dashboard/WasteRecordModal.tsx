@@ -185,6 +185,7 @@ export function WasteRecordModal({
                 <option value="Composting">Composting</option>
                 <option value="Recycling">Recycling</option>
                 <option value="Landfill">Landfill</option>
+                <option value="Incineration">Incineration</option>
                 <option value="Other / Unknown">Other / Unknown</option>
               </select>
             </label>

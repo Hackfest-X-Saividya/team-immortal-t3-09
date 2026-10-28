@@ -13,8 +13,13 @@ import {
 import { COLOR_GREEN } from '@/lib/constants'
 import type { MonthlyEmission } from '@/types/sustainability'
 
+export interface ExtendedMonthlyEmission extends MonthlyEmission {
+  forecast?: number
+  isProjected?: boolean
+}
+
 export interface EmissionsLineChartProps {
-  data: MonthlyEmission[]
+  data: ExtendedMonthlyEmission[]
   height?: number
   showAxes?: boolean
 }
@@ -55,11 +60,20 @@ export function EmissionsLineChart({
           <Line
             type="monotone"
             dataKey="value"
-            name="Emissions"
+            name="Measured Emissions"
             stroke={COLOR_GREEN}
             strokeWidth={showAxes ? 3 : 2.5}
             dot={{ r: showAxes ? 4 : 3, fill: COLOR_GREEN, strokeWidth: 2, stroke: '#fff' }}
             activeDot={{ r: 6 }}
+          />
+          <Line
+            type="monotone"
+            dataKey="forecast"
+            name="ML Projected Forecast"
+            stroke="#C084FC"
+            strokeDasharray="4 4"
+            strokeWidth={2}
+            dot={{ r: 4, fill: '#C084FC', strokeWidth: 2, stroke: '#fff' }}
           />
         </LineChart>
       </ResponsiveContainer>

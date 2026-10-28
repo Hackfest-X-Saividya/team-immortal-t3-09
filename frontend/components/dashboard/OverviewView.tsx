@@ -1,15 +1,17 @@
 'use client'
 
-import React from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   ArrowRight,
   BusFront,
   CircleHelp,
   Cloud,
+  Layers,
   MoreHorizontal,
   Package,
   Recycle,
+  Sparkles,
   Target,
   Truck,
   Wallet,
@@ -22,16 +24,175 @@ import { Card } from '@/components/ui/Card'
 import { Metric } from '@/components/ui/Metric'
 import { MiniSpark } from '@/components/ui/MiniSpark'
 import { Pill } from '@/components/ui/Pill'
-import {
-  DEFAULT_MONTHLY_EMISSIONS,
-  DEFAULT_RECOMMENDATIONS,
-  DEFAULT_RESOURCE_BREAKDOWN,
-} from '@/lib/constants'
-import { demoService } from '@/services/demo.service'
+import { useAuth } from '@/context/auth-context'
+import { apiClient } from '@/services/api-client'
+
+interface DashboardSummaryData {
+  workspace_id: string
+  workspace_name: string
+  total_emissions_kg: number
+  electricity: {
+    total_kwh: number
+    emissions_kg: number
+    cost_inr: number
+    record_count: number
+  }
+  transportation: {
+    total_liters: number
+    emissions_kg: number
+    cost_inr: number
+    total_distance_km?: number
+    record_count: number
+  }
+  waste: {
+    total_weight_kg: number
+    emissions_kg: number
+    recovery_rate_pct: number
+    record_count: number
+  }
+  monthly_emissions_trend: Array<{ month: string; value: number }>
+  category_breakdown: Array<{ name: string; value: number; color: string; emissions_kg?: number }>
+  active_interventions_count: number
+}
+
+interface RecentActivityItem {
+  id: string
+  category: 'Electricity' | 'Transportation' | 'Waste'
+  activity: string
+  quantity: string
+  date: string
+  status: string
+}
 
 export function OverviewView() {
   const router = useRouter()
-  const activities = demoService.getRecentActivities()
+  const { session, user, token } = useAuth()
+  const isAuth = Boolean(session.isAuthenticated && token)
+
+  const [summary, setSummary] = useState<DashboardSummaryData | null>(null)
+  const [activities, setActivities] = useState<RecentActivityItem[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const [trendForecast, setTrendForecast] = useState<{
+    points: any[]
+    status: string
+    modelMetrics?: any
+    message?: string
+  } | null>(null)
+
+  const fetchSummary = useCallback(async () => {
+    if (!isAuth || !token) return
+    setIsLoading(true)
+    try {
+      const data = await apiClient.get<DashboardSummaryData>('/dashboard/summary', { token })
+      setSummary(data)
+
+      // Fetch recent records and ML emissions trend forecast concurrently
+      const [elecRes, transRes, wasteRes, trendRes] = await Promise.allSettled([
+        apiClient.get<any[]>('/electricity', { token }),
+        apiClient.get<any[]>('/transportation', { token }),
+        apiClient.get<any[]>('/waste', { token }),
+        apiClient.get<any>('/emissions/trend?horizon=3', { token }),
+      ])
+
+      if (trendRes.status === 'fulfilled' && trendRes.value) {
+        const val = trendRes.value
+        if (val.status === 'ready' && Array.isArray(val.combined_series) && val.combined_series.length > 0) {
+          setTrendForecast({
+            points: val.combined_series,
+            status: val.status,
+            modelMetrics: val.model_metrics || val.model_info?.evaluation_metrics,
+            message: val.message,
+          })
+        } else if (Array.isArray(val.historical_series) && val.historical_series.length > 0) {
+          setTrendForecast({
+            points: val.historical_series,
+            status: val.status,
+            modelMetrics: val.model_metrics || val.model_info?.evaluation_metrics,
+            message: val.message,
+          })
+        }
+      }
+
+      const acts: RecentActivityItem[] = []
+
+      if (elecRes.status === 'fulfilled' && Array.isArray(elecRes.value)) {
+        elecRes.value.slice(-2).reverse().forEach((r: any) => {
+          acts.push({
+            id: r.id,
+            category: 'Electricity',
+            activity: `${r.building_or_department || 'Facility'} meter log`,
+            quantity: `${Number(r.consumption_kwh).toLocaleString()} kWh`,
+            date: r.reporting_month || 'Recent',
+            status: 'Verified',
+          })
+        })
+      }
+
+      if (transRes.status === 'fulfilled' && Array.isArray(transRes.value)) {
+        transRes.value.slice(-2).reverse().forEach((r: any) => {
+          acts.push({
+            id: r.id,
+            category: 'Transportation',
+            activity: r.route_name ? `Route ${r.route_name}` : `${r.mode || 'Fleet'} trip`,
+            quantity: `${Number(r.distance_km).toLocaleString()} km`,
+            date: r.date || 'Recent',
+            status: 'Verified',
+          })
+        })
+      }
+
+      if (wasteRes.status === 'fulfilled' && Array.isArray(wasteRes.value)) {
+        wasteRes.value.slice(-2).reverse().forEach((r: any) => {
+          acts.push({
+            id: r.id,
+            category: 'Waste',
+            activity: `${r.category || 'General'} disposal (${r.treatment_method || 'Disposal'})`,
+            quantity: `${Number(r.quantity_kg).toLocaleString()} kg`,
+            date: r.date || 'Recent',
+            status: 'Verified',
+          })
+        })
+      }
+
+      setActivities(acts)
+    } catch (err: any) {
+      console.error('Failed to load dashboard summary:', err)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [isAuth])
+
+  useEffect(() => {
+    if (isAuth) {
+      fetchSummary()
+    } else {
+      setSummary(null)
+      setActivities([])
+    }
+  }, [isAuth, fetchSummary])
+
+  const totalEmissions = summary ? summary.total_emissions_kg : 0
+  const electricityKwh = summary ? summary.electricity.total_kwh : 0
+  const transportCost = summary ? summary.transportation.cost_inr : 0
+  const wasteGenerated = summary ? summary.waste.total_weight_kg : 0
+  const wasteRecoveryRate = summary ? summary.waste.recovery_rate_pct : 0
+  const activeInterventions = summary ? summary.active_interventions_count : 0
+
+  const totalRecordCount = summary
+    ? summary.electricity.record_count +
+      summary.transportation.record_count +
+      summary.waste.record_count
+    : 0
+
+  const trendData = summary?.monthly_emissions_trend || []
+  const chartData = trendForecast?.points && trendForecast.points.length > 0
+    ? trendForecast.points
+    : trendData
+  const breakdownData = summary?.category_breakdown || []
+
+  // Modeled savings: ~15% potential based on actual measured emissions
+  const potentialMonthlySavingsInr = totalEmissions > 0 ? Math.round(totalEmissions * 0.15 * 8.5) : 0
+  const goalProgressPercent = totalRecordCount > 0 ? (activeInterventions > 0 ? Math.min(100, activeInterventions * 25) : 10) : 0
 
   return (
     <div className="space-y-6">
@@ -40,13 +201,13 @@ export function OverviewView() {
         <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-center">
           <div>
             <p className="text-xs font-medium text-[#B9D0B3]">
-              OCTOBER 2026 · SUSTAINABILITY WORKSPACE
+              {isAuth ? `${user.workspaceName.toUpperCase()} · ${user.accountType.toUpperCase()} WORKSPACE` : 'OCTOBER 2026 · DEMO WORKSPACE'}
             </p>
             <h1 className="mt-2 text-2xl font-semibold tracking-[-.04em] sm:text-3xl">
               Your impact, at a glance.
             </h1>
             <p className="mt-2 max-w-[510px] text-sm leading-6 text-white/65">
-              A clear starting point for making more sustainable decisions across your resources.
+              Authoritative emissions calculations based strictly on your workspace&apos;s verified activity records.
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-3 rounded-xl bg-white/10 p-3">
@@ -54,67 +215,93 @@ export function OverviewView() {
               <Target size={18} />
             </span>
             <div>
-              <p className="text-[10px] text-white/55">Reduction goal</p>
+              <p className="text-[10px] text-white/55">Active interventions</p>
               <p className="mt-1 text-xl font-semibold">
-                34% <span className="text-xs font-normal text-white/55">of 50%</span>
+                {activeInterventions} <span className="text-xs font-normal text-white/55">in progress</span>
               </p>
             </div>
           </div>
         </div>
       </div>
 
+      {isAuth && totalRecordCount === 0 && (
+        <Card className="border border-[#DCE4DA] bg-[#F7FAF5] p-5">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#285943] text-white">
+                <Sparkles size={18} />
+              </span>
+              <div>
+                <h2 className="text-sm font-semibold text-[#285943]">Welcome to your new workspace!</h2>
+                <p className="text-xs text-[#5D6F62]">
+                  No consumption logs recorded yet. Add your first electricity, travel, or waste entries to see live calculations.
+                </p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <Button className="px-3 py-1.5 text-xs" onClick={() => router.push('/dashboard/electricity')}>
+                Add electricity
+              </Button>
+              <Button className="px-3 py-1.5 text-xs" variant="secondary" onClick={() => router.push('/dashboard/waste')}>
+                Add waste
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* Metrics Row */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Metric
           icon={Cloud}
           label="Estimated carbon emissions"
-          value="2,480"
+          value={totalRecordCount > 0 ? Math.round(totalEmissions).toLocaleString() : '0'}
           unit="kg CO₂e"
-          trend={<MiniSpark up />}
-          note="Compared with 2,260 kg last period"
+          trend={<MiniSpark up={totalEmissions > 0} />}
+          note={totalRecordCount > 0 ? `Calculated from ${totalRecordCount} workspace records` : 'No records logged yet'}
           tone="green"
         />
         <Metric
           icon={Zap}
           label="Electricity consumption"
-          value="1,240"
+          value={totalRecordCount > 0 ? Math.round(electricityKwh).toLocaleString() : '0'}
           unit="kWh"
-          trend={<MiniSpark up />}
-          note="8.4% above your baseline"
+          trend={<MiniSpark up={electricityKwh > 0} />}
+          note={`${summary?.electricity.record_count || 0} electricity periods recorded`}
           tone="olive"
         />
         <Metric
           icon={Truck}
           label="Transport & fuel cost"
-          value="₹18,500"
+          value={transportCost > 0 ? `₹${Math.round(transportCost).toLocaleString('en-IN')}` : '₹0'}
           trend={<MiniSpark />}
-          note="Estimated for current routes"
+          note={`${summary?.transportation.record_count || 0} fleet trips recorded`}
           tone="sage"
         />
         <Metric
           icon={Package}
           label="Total waste generated"
-          value="420"
+          value={wasteGenerated > 0 ? Math.round(wasteGenerated).toLocaleString() : '0'}
           unit="kg"
           trend={<MiniSpark />}
-          note="52% recovery rate"
+          note={`${wasteRecoveryRate}% recovery rate`}
           tone="amber"
         />
         <Metric
           icon={Wallet}
           label="Potential monthly savings"
-          value="₹6,800"
-          trend={<Pill>Estimated</Pill>}
-          note="Based on 3 recommended actions"
+          value={potentialMonthlySavingsInr > 0 ? `₹${potentialMonthlySavingsInr.toLocaleString('en-IN')}` : '₹0'}
+          trend={<Pill>Modeled</Pill>}
+          note={totalEmissions > 0 ? 'Modeled 15% reduction target' : 'Add records to model savings'}
           tone="green"
         />
         <Metric
           icon={Target}
           label="Reduction goal progress"
-          value="34"
+          value={goalProgressPercent.toString()}
           unit="%"
-          trend={<span className="text-[11px] font-medium text-[#4B8A63]">On track</span>}
-          note="16% remaining to your next milestone"
+          trend={<span className="text-[11px] font-medium text-[#4B8A63]">{goalProgressPercent > 0 ? 'Active' : 'Unset'}</span>}
+          note={activeInterventions > 0 ? `${activeInterventions} measures in progress` : 'Set milestone in Reports'}
           tone="sage"
         />
       </div>
@@ -124,8 +311,20 @@ export function OverviewView() {
         <Card className="p-5">
           <div className="flex items-start justify-between">
             <div>
-              <h2 className="font-semibold text-[#405448]">Emissions trend</h2>
-              <p className="mt-1 text-xs text-[#8A978D]">Estimated monthly footprint · kg CO₂e</p>
+              <div className="flex items-center gap-2">
+                <h2 className="font-semibold text-[#405448]">Emissions trend</h2>
+                {trendForecast?.status === 'ready' && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-[#F3E8FF] px-2 py-0.5 text-[10px] font-semibold text-[#7E22CE]">
+                    <Sparkles size={10} className="text-[#9333EA]" />
+                    ML Forecast (3-mo)
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-[#8A978D]">
+                {trendForecast?.status === 'ready'
+                  ? 'Historical records (solid green) & XGBoost forecast (dashed purple) · kg CO₂e'
+                  : 'Estimated monthly footprint · kg CO₂e'}
+              </p>
             </div>
             <button
               type="button"
@@ -136,118 +335,183 @@ export function OverviewView() {
             </button>
           </div>
           <div className="mt-5">
-            <EmissionsLineChart data={DEFAULT_MONTHLY_EMISSIONS} height={230} showAxes={true} />
-          </div>
-          <div className="mt-3 flex items-center gap-2 text-xs text-[#829087]">
-            <span className="h-2 w-2 rounded-full bg-[#285943]" /> October is 1.7% lower than your September peak
-          </div>
-        </Card>
-
-        <Card className="p-5">
-          <div className="flex items-start justify-between">
-            <div>
-              <h2 className="font-semibold text-[#405448]">Where impact comes from</h2>
-              <p className="mt-1 text-xs text-[#8A978D]">Share of estimated emissions</p>
-            </div>
-            <CircleHelp size={16} className="text-[#A4AEA5]" />
-          </div>
-          <div className="mt-4 flex items-center justify-center">
-            <ResourceBreakdownChart data={DEFAULT_RESOURCE_BREAKDOWN} />
-          </div>
-          <div className="mt-2 space-y-2.5">
-            {DEFAULT_RESOURCE_BREAKDOWN.map((item) => (
-              <div key={item.name} className="flex items-center justify-between text-xs">
-                <span className="flex items-center gap-2 text-[#65756A]">
-                  <span className="h-2 w-2 rounded-full" style={{ background: item.color }} />
-                  {item.name}
-                </span>
-                <span className="font-medium text-[#405448]">{item.value}%</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      {/* Recommended actions & Recent activity */}
-      <div className="grid gap-5 xl:grid-cols-[1.1fr_.9fr]">
-        <Card className="p-5">
-          <div className="flex items-start justify-between">
-            <div>
-              <h2 className="font-semibold text-[#405448]">Recommended actions</h2>
-              <p className="mt-1 text-xs text-[#8A978D]">Illustrative opportunities based on your demo data</p>
-            </div>
-            <Button
-              variant="ghost"
-              onClick={() => router.push('/dashboard/insights')}
-              className="px-2 py-1 text-xs"
-            >
-              View all <ArrowRight size={13} />
-            </Button>
-          </div>
-
-          <div className="mt-5 space-y-3">
-            {DEFAULT_RECOMMENDATIONS.map((rec, i) => (
-              <div key={rec.id} className="flex items-center gap-3 rounded-xl border border-[#EDF1EB] p-3">
-                <span
-                  className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
-                    i === 0
-                      ? 'bg-[#E7F1E5] text-[#285943]'
-                      : i === 1
-                        ? 'bg-[#F0F3E9] text-[#7C8750]'
-                        : 'bg-[#FBF1D8] text-[#8A6C2E]'
-                  }`}
-                >
-                  {i === 0 ? <Zap size={16} /> : i === 1 ? <BusFront size={16} /> : <Recycle size={16} />}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-[#405448]">{rec.title}</p>
-                  <p className="mt-1 text-[11px] text-[#8A978D]">
-                    {rec.category} · {rec.difficulty}
+            {chartData.length > 0 ? (
+              <div>
+                <EmissionsLineChart data={chartData} height={230} showAxes={true} />
+                {trendForecast?.status === 'ready' && trendForecast.modelMetrics && (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#EDF1EB] pt-2.5 text-[11px] text-[#55695C]">
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-[#285943]" />
+                        Measured
+                      </span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-[#C084FC]" />
+                        ML Forecast (XGBoost)
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 font-mono text-[10px] text-[#7E22CE]">
+                      <span>R²: {Number(trendForecast.modelMetrics.R2).toFixed(3)}</span>
+                      <span>•</span>
+                      <span>MAE: {Number(trendForecast.modelMetrics.MAE_kgCO2e).toFixed(1)} kg CO₂e</span>
+                    </div>
+                  </div>
+                )}
+                {trendForecast?.status === 'insufficient_data' && (
+                  <p className="mt-2 text-[11px] text-[#7A8E80]">
+                    Note: At least 2 monthly reporting periods required for ML trend forecasting.
                   </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-xs font-semibold text-[#4B8A63]">{rec.savingsMonthly}</p>
-                  <p className="mt-1 text-[10px] text-[#A0AAA2]">estimated</p>
-                </div>
+                )}
               </div>
-            ))}
+            ) : (
+              <div className="flex h-[230px] flex-col items-center justify-center rounded-xl border border-dashed border-[#E0E7DE] bg-[#FBFDFB] text-center p-4">
+                <Cloud className="h-8 w-8 text-[#A0B4A2]" />
+                <p className="mt-2 text-xs font-semibold text-[#285943]">No emissions trajectory recorded yet</p>
+                <p className="mt-1 text-[11px] text-[#7A8E80] max-w-xs">
+                  Monthly trend graph will appear once consumption records are added across reporting periods.
+                </p>
+              </div>
+            )}
           </div>
         </Card>
 
         <Card className="p-5">
           <div className="flex items-start justify-between">
             <div>
-              <h2 className="font-semibold text-[#405448]">Recent activity</h2>
-              <p className="mt-1 text-xs text-[#8A978D]">Latest demo records</p>
+              <h2 className="font-semibold text-[#405448]">Resource breakdown</h2>
+              <p className="mt-1 text-xs text-[#8A978D]">Emission share across categories</p>
             </div>
             <button
               type="button"
-              className="text-xs font-medium text-[#285943] hover:underline cursor-pointer"
-              onClick={() => router.push('/dashboard/reports')}
+              aria-label="More breakdown options"
+              className="rounded-lg p-1.5 text-[#8A978D] hover:bg-[#F1F5EF]"
             >
-              See report
+              <MoreHorizontal size={18} />
             </button>
           </div>
-          <div className="mt-4 space-y-1">
-            {activities.map((row) => (
-              <div
-                key={row.id}
-                className="grid grid-cols-[54px_1fr_auto] items-center gap-3 border-b border-[#F0F3EF] py-3 last:border-0"
-              >
-                <span className="text-[10px] text-[#98A49A]">{row.date.split(',')[0]}</span>
-                <div>
-                  <p className="text-xs font-medium text-[#5A6A5F]">{row.activity}</p>
-                  <p className="mt-0.5 text-[10px] text-[#9AA59C]">{row.category}</p>
-                </div>
-                <span className="text-xs font-medium text-[#607168]">{row.quantity}</span>
+          <div className="mt-4 flex flex-col items-center">
+            {breakdownData.length > 0 ? (
+              <ResourceBreakdownChart data={breakdownData} />
+            ) : (
+              <div className="flex h-[230px] w-full flex-col items-center justify-center rounded-xl border border-dashed border-[#E0E7DE] bg-[#FBFDFB] text-center p-4">
+                <Layers className="h-8 w-8 text-[#A0B4A2]" />
+                <p className="mt-2 text-xs font-semibold text-[#285943]">No category breakdown available</p>
+                <p className="mt-1 text-[11px] text-[#7A8E80] max-w-xs">
+                  Proportional shares across Electricity, Transportation, and Waste will be calculated when records exist.
+                </p>
               </div>
-            ))}
+            )}
           </div>
         </Card>
       </div>
 
-      <div className="rounded-xl border border-[#DFEBDD] bg-[#F0F6EE] px-4 py-3 text-xs text-[#718074]">
-        <span className="font-medium text-[#4E6654]">Demo workspace:</span> All figures are illustrative and prepared for exploring CarbonIQ. They are not verified measurements or achieved savings.
+      {/* Recent Activity & Next Steps */}
+      <div className="grid gap-5 xl:grid-cols-2">
+        <Card className="p-5">
+          <div className="flex items-center justify-between border-b border-[#EDF1EB] pb-3">
+            <h2 className="font-semibold text-[#3E5246]">Recent activity</h2>
+            <Pill tone="sage">Verified logs</Pill>
+          </div>
+          <div className="mt-3 divide-y divide-[#F1F5EF]">
+            {activities.length > 0 ? (
+              activities.map((act) => (
+                <div key={act.id} className="flex items-center justify-between py-3 text-xs">
+                  <div className="flex items-center gap-3">
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-[#E7F1E5] text-[#285943]">
+                      {act.category === 'Electricity' ? (
+                        <Zap size={14} />
+                      ) : act.category === 'Transportation' ? (
+                        <Truck size={14} />
+                      ) : (
+                        <Package size={14} />
+                      )}
+                    </span>
+                    <div>
+                      <p className="font-medium text-[#2F4436]">{act.activity}</p>
+                      <p className="text-[11px] text-[#8A978D]">{act.date}</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-semibold text-[#285943]">{act.quantity}</p>
+                    <p className="text-[10px] text-[#8A978D]">{act.status}</p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="py-8 text-center text-[#748178]">
+                <p className="text-xs font-medium text-[#405448]">No activity records logged yet</p>
+                <p className="mt-1 text-[11px] text-[#7A8E80]">
+                  Recent activity entries will appear as you record electricity, transport, or waste data.
+                </p>
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <Card className="p-5">
+          <div className="flex items-center justify-between border-b border-[#EDF1EB] pb-3">
+            <h2 className="font-semibold text-[#3E5246]">Top reduction opportunities</h2>
+            <button
+              type="button"
+              onClick={() => router.push('/dashboard/simulator')}
+              className="flex items-center gap-1 text-xs font-medium text-[#285943] hover:underline"
+            >
+              <span>Explore simulator</span>
+              <ArrowRight size={13} />
+            </button>
+          </div>
+          <div className="mt-3 divide-y divide-[#F1F5EF]">
+            {totalRecordCount > 0 ? (
+              <>
+                <div className="flex items-center justify-between py-3 text-xs">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-[#2F4436]">Facility HVAC & Lighting Schedule</span>
+                      <Pill tone="amber">High Impact</Pill>
+                    </div>
+                    <p className="text-[11px] text-[#78897D]">Electricity · 15% reduction target</p>
+                  </div>
+                  <div className="text-right font-semibold text-[#285943]">
+                    {potentialMonthlySavingsInr > 0 ? `₹${potentialMonthlySavingsInr.toLocaleString('en-IN')}/mo` : 'Modeled'}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between py-3 text-xs">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-[#2F4436]">Fleet Route Consolidation</span>
+                      <Pill tone="green">Medium Impact</Pill>
+                    </div>
+                    <p className="text-[11px] text-[#78897D]">Transportation · Avoided fuel mileage</p>
+                  </div>
+                  <div className="text-right font-semibold text-[#285943]">
+                    Explore in Fleet
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between py-3 text-xs">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-[#2F4436]">Organic Waste Segregation & Composting</span>
+                      <Pill tone="green">Quick Win</Pill>
+                    </div>
+                    <p className="text-[11px] text-[#78897D]">Waste · Methane abatement</p>
+                  </div>
+                  <div className="text-right font-semibold text-[#285943]">
+                    Diversion credit
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="py-8 text-center text-[#748178]">
+                <p className="text-xs font-medium text-[#405448]">No baseline records available</p>
+                <p className="mt-1 text-[11px] text-[#7A8E80]">
+                  Log your baseline data to generate prioritized abatement interventions.
+                </p>
+              </div>
+            )}
+          </div>
+        </Card>
       </div>
     </div>
   )

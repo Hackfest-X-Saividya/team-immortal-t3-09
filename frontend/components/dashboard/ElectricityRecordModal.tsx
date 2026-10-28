@@ -22,6 +22,7 @@ export function ElectricityRecordModal({
 }: ElectricityRecordModalProps) {
   const [reportingMonth, setReportingMonth] = useState('2026-10')
   const [consumptionKwh, setConsumptionKwh] = useState<string>('1240')
+  const [source, setSource] = useState<string>('Grid')
   const [billAmountInr, setBillAmountInr] = useState<string>('10500')
   const [buildingOrDepartment, setBuildingOrDepartment] = useState('')
   const [notes, setNotes] = useState('')
@@ -31,12 +32,14 @@ export function ElectricityRecordModal({
     if (initialRecord) {
       setReportingMonth(initialRecord.reportingMonth)
       setConsumptionKwh(String(initialRecord.consumptionKwh))
+      setSource(initialRecord.source || 'Grid')
       setBillAmountInr(initialRecord.billAmountInr ? String(initialRecord.billAmountInr) : '')
       setBuildingOrDepartment(initialRecord.buildingOrDepartment || '')
       setNotes(initialRecord.notes || '')
     } else {
       setReportingMonth('2026-10')
       setConsumptionKwh('')
+      setSource('Grid')
       setBillAmountInr('')
       setBuildingOrDepartment('')
       setNotes('')
@@ -69,12 +72,13 @@ export function ElectricityRecordModal({
       {
         reportingMonth: reportingMonth.trim(),
         consumptionKwh: parsedKwh,
+        source,
         billAmountInr: bill && !isNaN(bill) ? bill : undefined,
         buildingOrDepartment: buildingOrDepartment.trim() || undefined,
         notes: notes.trim() || undefined,
-        calculatedEmissionsKg: liveEmissionsKg,
-        emissionFactorUsed: EMISSION_FACTORS.electricityGrid,
-        factorType: 'illustrative_grid_factor',
+        calculatedEmissionsKg: source === 'Solar Rooftop' ? 0 : liveEmissionsKg,
+        emissionFactorUsed: source === 'Solar Rooftop' ? 0.0 : EMISSION_FACTORS.electricityGrid,
+        factorType: source === 'Solar Rooftop' ? 'solar_rooftop_zero' : 'illustrative_grid_factor',
       },
       initialRecord?.id
     )
@@ -125,6 +129,20 @@ export function ElectricityRecordModal({
             </label>
 
             <label className="block text-xs font-medium text-[#4D6054]">
+              Electricity source
+              <select
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-[#DCE4DA] bg-[#FBFDFB] px-3 py-2 text-xs text-[#28352D] outline-none focus:border-[#285943]"
+              >
+                <option value="Grid">Grid Electricity (CEA Baseline)</option>
+                <option value="Solar Rooftop">Solar Rooftop (Zero direct emissions)</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block text-xs font-medium text-[#4D6054]">
               Consumption (kWh) <span className="text-[#A35C49]">*</span>
               <input
                 type="number"
@@ -137,9 +155,7 @@ export function ElectricityRecordModal({
                 required
               />
             </label>
-          </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
             <label className="block text-xs font-medium text-[#4D6054]">
               Bill amount (₹) <span className="text-xs text-[#8A978D] font-normal">(optional)</span>
               <input
@@ -152,19 +168,19 @@ export function ElectricityRecordModal({
                 className="mt-1 w-full rounded-xl border border-[#DCE4DA] bg-[#FBFDFB] px-3 py-2 text-xs text-[#28352D] outline-none focus:border-[#285943]"
               />
             </label>
-
-            <label className="block text-xs font-medium text-[#4D6054]">
-              Building / Department{' '}
-              <span className="text-xs text-[#8A978D] font-normal">(optional)</span>
-              <input
-                type="text"
-                placeholder="e.g., Science Block B"
-                value={buildingOrDepartment}
-                onChange={(e) => setBuildingOrDepartment(e.target.value)}
-                className="mt-1 w-full rounded-xl border border-[#DCE4DA] bg-[#FBFDFB] px-3 py-2 text-xs text-[#28352D] outline-none focus:border-[#285943]"
-              />
-            </label>
           </div>
+
+          <label className="block text-xs font-medium text-[#4D6054]">
+            Building / Department{' '}
+            <span className="text-xs text-[#8A978D] font-normal">(optional)</span>
+            <input
+              type="text"
+              placeholder="e.g., Science Block B"
+              value={buildingOrDepartment}
+              onChange={(e) => setBuildingOrDepartment(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-[#DCE4DA] bg-[#FBFDFB] px-3 py-2 text-xs text-[#28352D] outline-none focus:border-[#285943]"
+            />
+          </label>
 
           <label className="block text-xs font-medium text-[#4D6054]">
             Notes & Meter Details{' '}

@@ -33,6 +33,7 @@ async def create_waste_record(
         "date": req.date,
         "category": req.category,
         "quantity_kg": req.quantity_kg,
+        "unit": req.unit or "kg",
         "treatment_method": req.treatment_method or "Other / Unknown",
         "building_or_department": req.building_or_department,
         "collection_provider": req.collection_provider,
@@ -40,6 +41,10 @@ async def create_waste_record(
         "notes": req.notes,
         "calculated_emissions_kg": calc.calculated_emissions_kg,
         "emission_factor_used": calc.emission_factor_used,
+        "factor_id": calc.factor_id,
+        "factor_source": calc.factor_source,
+        "factor_version": calc.factor_version,
+        "calculation_boundary": calc.calculation_boundary,
         "status": "Verified",
         "created_at": now,
         "updated_at": now,
@@ -58,6 +63,7 @@ async def list_waste_records(
     records = []
     async for item in cursor:
         item.pop("_id", None)
+        item.setdefault("unit", "kg")
         records.append(WasteRecordResponse(**item))
     return records
 
@@ -71,6 +77,7 @@ async def get_waste_record(
     if not doc:
         raise EntityNotFoundException(f"Waste record {record_id} not found.")
     doc.pop("_id", None)
+    doc.setdefault("unit", "kg")
     return WasteRecordResponse(**doc)
 
 
@@ -95,7 +102,13 @@ async def update_waste_record(
     updates["category"] = new_cat
     updates["calculated_emissions_kg"] = calc.calculated_emissions_kg
     updates["emission_factor_used"] = calc.emission_factor_used
+    updates["factor_id"] = calc.factor_id
+    updates["factor_source"] = calc.factor_source
+    updates["factor_version"] = calc.factor_version
+    updates["calculation_boundary"] = calc.calculation_boundary
 
+    if req.unit is not None:
+        updates["unit"] = req.unit
     if req.date is not None:
         updates["date"] = req.date
     if req.building_or_department is not None:
@@ -110,6 +123,7 @@ async def update_waste_record(
     await db.waste_records.update_one({"id": record_id, "workspace_id": workspace_id}, {"$set": updates})
     updated_doc = await db.waste_records.find_one({"id": record_id, "workspace_id": workspace_id})
     updated_doc.pop("_id", None)
+    updated_doc.setdefault("unit", "kg")
     return WasteRecordResponse(**updated_doc)
 
 
@@ -117,11 +131,11 @@ async def delete_waste_record(
     record_id: str,
     workspace_id: str,
     db: Any,
-) -> bool:
+) -> Dict[str, Any]:
     res = await db.waste_records.delete_one({"id": record_id, "workspace_id": workspace_id})
     if res.deleted_count == 0:
         raise EntityNotFoundException(f"Waste record {record_id} not found.")
-    return True
+    return {"success": True, "deleted_id": record_id}
 
 
 async def get_waste_summary(
@@ -132,6 +146,7 @@ async def get_waste_summary(
     records = []
     async for item in cursor:
         item.pop("_id", None)
+        item.setdefault("unit", "kg")
         records.append(item)
 
     if not records:
@@ -147,55 +162,67 @@ async def get_waste_summary(
         )
 
     total_qty = sum(r.get("quantity_kg", 0.0) for r in records)
-    total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in records)
+    recycled_qty = sum(
+        r.get("quantity_kg", 0.0)
+        for r in records
+        if (r.get("treatment_method") or "").lower() == "recycling" or (r.get("category") or "").lower() == "recyclable"
+    )
+    total_emissions = sum(r.get("calculated_emissions_kg") or 0.0 for r in records)
+    rec_rate = calculate_recycling_rate(recycled_qty, total_qty)
 
-    cat_map = defaultdict(float)
-    treatment_map = defaultdict(float)
-    monthly_map = defaultdict(lambda: {"quantity_kg": 0.0, "emissions_kg": 0.0})
+    cat_map: Dict[str, float] = defaultdict(float)
+    treat_map: Dict[str, float] = defaultdict(float)
+    month_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"total_kg": 0.0, "recycled_kg": 0.0, "emissions": 0.0})
 
-    recycled_qty = 0.0
     for r in records:
+        cat = r.get("category") or "General"
+        treat = r.get("treatment_method") or "Other / Unknown"
         qty = r.get("quantity_kg", 0.0)
-        cat = r.get("category") or "Unspecified"
-        method = r.get("treatment_method") or "Other / Unknown"
+
         cat_map[cat] += qty
-        treatment_map[method] += qty
+        treat_map[treat] += qty
 
-        if method.strip().lower() == "recycling" or cat.strip().lower() == "recyclable":
-            recycled_qty += qty
-
-        month_str = normalize_month(r.get("date", ""))
-        monthly_map[month_str]["quantity_kg"] += qty
-        monthly_map[month_str]["emissions_kg"] += r.get("calculated_emissions_kg", 0.0)
-
-    recycling_rate = calculate_recycling_rate(recycled_qty, total_qty)
+        month_key = normalize_month(r["date"])
+        month_map[month_key]["total_kg"] += qty
+        month_map[month_key]["emissions"] += r.get("calculated_emissions_kg", 0.0)
+        if treat.lower() == "recycling" or cat.lower() == "recyclable":
+            month_map[month_key]["recycled_kg"] += qty
 
     cat_breakdown = [
-        {"category": cat, "quantity_kg": round(qty, 1), "percentage": round((qty / total_qty) * 100, 1) if total_qty > 0 else 0}
-        for cat, qty in cat_map.items()
+        {
+            "category": c,
+            "quantity_kg": round(qty, 1),
+            "percentage": round((qty / total_qty) * 100, 1) if total_qty > 0 else 0.0,
+        }
+        for c, qty in sorted(cat_map.items(), key=lambda x: x[1], reverse=True)
     ]
 
-    treatment_breakdown = [
-        {"treatment_method": method, "quantity_kg": round(qty, 1), "percentage": round((qty / total_qty) * 100, 1) if total_qty > 0 else 0}
-        for method, qty in treatment_map.items()
+    treat_breakdown = [
+        {
+            "treatment_method": t,
+            "quantity_kg": round(qty, 1),
+            "percentage": round((qty / total_qty) * 100, 1) if total_qty > 0 else 0.0,
+        }
+        for t, qty in sorted(treat_map.items(), key=lambda x: x[1], reverse=True)
     ]
 
     monthly_trends = [
         {
             "month": m,
-            "quantity_kg": round(data["quantity_kg"], 1),
-            "emissions_kg": round(data["emissions_kg"], 1),
+            "total_kg": round(data["total_kg"], 1),
+            "recycled_kg": round(data["recycled_kg"], 1),
+            "emissions_kg": round(data["emissions"], 1),
         }
-        for m, data in sorted(monthly_map.items())
+        for m, data in sorted(month_map.items())
     ]
 
     return WasteSummaryResponse(
         total_waste_kg=round(total_qty, 1),
         recycled_waste_kg=round(recycled_qty, 1),
-        recycling_rate_percent=recycling_rate,
+        recycling_rate_percent=rec_rate,
         total_calculated_emissions_kg=round(total_emissions, 1),
         record_count=len(records),
         category_breakdown=cat_breakdown,
-        treatment_breakdown=treatment_breakdown,
+        treatment_breakdown=treat_breakdown,
         monthly_trends=monthly_trends,
     )

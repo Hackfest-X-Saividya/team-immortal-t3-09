@@ -57,7 +57,7 @@ export function AuthForm({ mode }: AuthFormProps) {
   const [error, setError] = useState('')
   const [submitted, setSubmitted] = useState(false)
 
-  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')
 
@@ -70,6 +70,9 @@ export function AuthForm({ mode }: AuthFormProps) {
     if (!password) {
       return setError('Please enter a password.')
     }
+    if (isSignup && password.length < 8) {
+      return setError('Password must be at least 8 characters long.')
+    }
     if (isSignup && password !== confirmPassword) {
       return setError('Passwords do not match.')
     }
@@ -79,20 +82,25 @@ export function AuthForm({ mode }: AuthFormProps) {
 
     setSubmitted(true)
 
-    if (isSignup) {
-      signUp({
-        name: name.trim(),
-        email: email.trim(),
-        accountType,
-        workspaceName: workspaceName.trim() || undefined,
-      })
-    } else {
-      signIn(email.trim())
-    }
+    try {
+      if (isSignup) {
+        await signUp({
+          name: name.trim(),
+          email: email.trim(),
+          password,
+          accountType,
+          workspaceName: workspaceName.trim() || undefined,
+        })
+      } else {
+        await signIn(email.trim(), password)
+      }
 
-    window.setTimeout(() => {
       router.push('/dashboard')
-    }, 450)
+    } catch (err: any) {
+      setSubmitted(false)
+      const msg = err.message || 'Authentication failed. Please check your credentials and try again.'
+      setError(msg)
+    }
   }
 
   return (

@@ -28,6 +28,10 @@ async def register_user(req: UserRegisterRequest, db: Any) -> TokenResponse:
     workspace_id = generate_id("ws")
     now = utc_iso()
 
+    account_type = req.account_type.lower().strip() if req.account_type else "college"
+    if account_type not in ("individual", "college", "organization"):
+        account_type = "individual"
+
     workspace_name = req.workspace_name.strip() if req.workspace_name else f"{req.full_name}'s Workspace"
     workspace_doc = {
         "id": workspace_id,
@@ -44,18 +48,25 @@ async def register_user(req: UserRegisterRequest, db: Any) -> TokenResponse:
         "email": req.email,
         "hashed_password": hash_password(req.password),
         "workspace_id": workspace_id,
+        "account_type": account_type,
         "created_at": now,
         "updated_at": now,
     }
     await db.users.insert_one(user_doc)
 
-    token = create_access_token({"sub": user_id, "workspace_id": workspace_id, "email": req.email})
+    token = create_access_token({
+        "sub": user_id,
+        "workspace_id": workspace_id,
+        "email": req.email,
+        "account_type": account_type,
+    })
     profile = UserProfileResponse(
         id=user_id,
         full_name=user_doc["full_name"],
         email=user_doc["email"],
         workspace_id=workspace_id,
         workspace_name=workspace_name,
+        account_type=account_type,
         created_at=now,
         initials=build_initials(user_doc["full_name"]),
     )
@@ -75,11 +86,13 @@ async def login_user(req: UserLoginRequest, db: Any) -> TokenResponse:
 
     workspace = await db.workspaces.find_one({"id": user.get("workspace_id")})
     workspace_name = workspace.get("name", "Workspace") if workspace else "Workspace"
+    account_type = user.get("account_type", "college")
 
     token = create_access_token({
         "sub": user["id"],
         "workspace_id": user.get("workspace_id", ""),
         "email": user["email"],
+        "account_type": account_type,
     })
 
     profile = UserProfileResponse(
@@ -88,6 +101,7 @@ async def login_user(req: UserLoginRequest, db: Any) -> TokenResponse:
         email=user["email"],
         workspace_id=user.get("workspace_id", ""),
         workspace_name=workspace_name,
+        account_type=account_type,
         created_at=user.get("created_at", utc_iso()),
         initials=build_initials(user.get("full_name", "User")),
     )
@@ -105,6 +119,7 @@ async def get_user_profile(user: Dict[str, Any], db: Any) -> UserProfileResponse
         email=user["email"],
         workspace_id=user.get("workspace_id", ""),
         workspace_name=workspace_name,
+        account_type=user.get("account_type", "college"),
         created_at=user.get("created_at", utc_iso()),
         initials=build_initials(user.get("full_name", "User")),
     )

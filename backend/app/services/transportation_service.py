@@ -40,9 +40,18 @@ async def create_transportation_record(
         "fuel_expenditure_inr": req.fuel_expenditure_inr,
         "vehicle_id": req.vehicle_id,
         "passenger_count": req.passenger_count,
+        "vehicle_capacity": req.vehicle_capacity,
+        "route_name": req.route_name,
+        "pickup_locations": req.pickup_locations,
+        "destination": req.destination,
         "notes": req.notes,
         "calculation_method": calc.calculation_method,
         "calculated_emissions_kg": calc.calculated_emissions_kg,
+        "emission_factor_used": calc.emission_factor_used,
+        "factor_id": calc.factor_id,
+        "factor_source": calc.factor_source,
+        "factor_version": calc.factor_version,
+        "calculation_boundary": calc.calculation_boundary,
         "created_at": now,
         "updated_at": now,
     }
@@ -99,12 +108,18 @@ async def update_transportation_record(
         fuel_consumed_liters=new_fuel_consumed,
         fuel_efficiency_km_per_l=new_efficiency,
     )
+
     updates["distance_km"] = new_dist
     updates["fuel_type"] = new_fuel_type
     updates["fuel_consumed_liters"] = new_fuel_consumed
     updates["fuel_efficiency_km_per_l"] = new_efficiency
-    updates["calculated_emissions_kg"] = calc.calculated_emissions_kg
     updates["calculation_method"] = calc.calculation_method
+    updates["calculated_emissions_kg"] = calc.calculated_emissions_kg
+    updates["emission_factor_used"] = calc.emission_factor_used
+    updates["factor_id"] = calc.factor_id
+    updates["factor_source"] = calc.factor_source
+    updates["factor_version"] = calc.factor_version
+    updates["calculation_boundary"] = calc.calculation_boundary
 
     if req.date is not None:
         updates["date"] = req.date
@@ -116,6 +131,14 @@ async def update_transportation_record(
         updates["vehicle_id"] = req.vehicle_id
     if req.passenger_count is not None:
         updates["passenger_count"] = req.passenger_count
+    if req.vehicle_capacity is not None:
+        updates["vehicle_capacity"] = req.vehicle_capacity
+    if req.route_name is not None:
+        updates["route_name"] = req.route_name
+    if req.pickup_locations is not None:
+        updates["pickup_locations"] = req.pickup_locations
+    if req.destination is not None:
+        updates["destination"] = req.destination
     if req.notes is not None:
         updates["notes"] = req.notes
 
@@ -129,11 +152,11 @@ async def delete_transportation_record(
     record_id: str,
     workspace_id: str,
     db: Any,
-) -> bool:
+) -> Dict[str, Any]:
     res = await db.transportation_records.delete_one({"id": record_id, "workspace_id": workspace_id})
     if res.deleted_count == 0:
         raise EntityNotFoundException(f"Transportation record {record_id} not found.")
-    return True
+    return {"success": True, "deleted_id": record_id}
 
 
 async def get_transportation_summary(
@@ -158,48 +181,55 @@ async def get_transportation_summary(
         )
 
     total_dist = sum(r.get("distance_km", 0.0) for r in records)
-    total_fuel = sum(r.get("fuel_consumed_liters", 0.0) or 0.0 for r in records)
-    total_exp = sum(r.get("fuel_expenditure_inr", 0.0) or 0.0 for r in records)
-    total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in records)
+    total_fuel = sum(
+        (r.get("fuel_consumed_liters") or (r.get("distance_km", 0.0) / r["fuel_efficiency_km_per_l"] if r.get("fuel_efficiency_km_per_l") else 0.0))
+        for r in records
+    )
+    total_expenditure = sum(r.get("fuel_expenditure_inr") or 0.0 for r in records)
+    total_emissions = sum(r.get("calculated_emissions_kg") or 0.0 for r in records)
 
-    mode_map = defaultdict(lambda: {"distance_km": 0.0, "emissions_kg": 0.0, "count": 0})
-    monthly_map = defaultdict(lambda: {"distance_km": 0.0, "emissions_kg": 0.0, "fuel_expenditure_inr": 0.0})
+    mode_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"distance_km": 0.0, "emissions": 0.0, "trips": 0})
+    month_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"distance_km": 0.0, "fuel_liters": 0.0, "emissions": 0.0})
 
     for r in records:
-        m = r.get("mode") or "Unspecified"
-        mode_map[m]["distance_km"] += r.get("distance_km", 0.0)
-        mode_map[m]["emissions_kg"] += r.get("calculated_emissions_kg", 0.0)
-        mode_map[m]["count"] += 1
+        mode = r.get("mode", "Other")
+        mode_map[mode]["distance_km"] += r.get("distance_km", 0.0)
+        mode_map[mode]["emissions"] += r.get("calculated_emissions_kg", 0.0)
+        mode_map[mode]["trips"] += 1
 
-        month_str = normalize_month(r.get("date", ""))
-        monthly_map[month_str]["distance_km"] += r.get("distance_km", 0.0)
-        monthly_map[month_str]["emissions_kg"] += r.get("calculated_emissions_kg", 0.0)
-        monthly_map[month_str]["fuel_expenditure_inr"] += r.get("fuel_expenditure_inr", 0.0) or 0.0
+        month_key = normalize_month(r["date"])
+        month_map[month_key]["distance_km"] += r.get("distance_km", 0.0)
+        month_map[month_key]["emissions"] += r.get("calculated_emissions_kg", 0.0)
+        if r.get("fuel_consumed_liters"):
+            month_map[month_key]["fuel_liters"] += r["fuel_consumed_liters"]
+        elif r.get("fuel_efficiency_km_per_l"):
+            month_map[month_key]["fuel_liters"] += r["distance_km"] / r["fuel_efficiency_km_per_l"]
 
     mode_breakdown = [
         {
-            "mode": mode,
+            "mode": m,
             "distance_km": round(data["distance_km"], 1),
-            "emissions_kg": round(data["emissions_kg"], 1),
-            "percentage": round((data["distance_km"] / total_dist) * 100, 1) if total_dist > 0 else 0,
+            "calculated_emissions_kg": round(data["emissions"], 1),
+            "percentage": round((data["emissions"] / total_emissions) * 100, 1) if total_emissions > 0 else 0.0,
+            "trips_count": data["trips"],
         }
-        for mode, data in mode_map.items()
+        for m, data in sorted(mode_map.items(), key=lambda x: x[1]["emissions"], reverse=True)
     ]
 
     monthly_trends = [
         {
             "month": m,
             "distance_km": round(data["distance_km"], 1),
-            "emissions_kg": round(data["emissions_kg"], 1),
-            "fuel_expenditure_inr": round(data["fuel_expenditure_inr"], 0),
+            "fuel_liters": round(data["fuel_liters"], 1),
+            "emissions_kg": round(data["emissions"], 1),
         }
-        for m, data in sorted(monthly_map.items())
+        for m, data in sorted(month_map.items())
     ]
 
     return TransportationSummaryResponse(
         total_distance_km=round(total_dist, 1),
         total_fuel_liters=round(total_fuel, 1),
-        total_expenditure_inr=round(total_exp, 0),
+        total_expenditure_inr=round(total_expenditure, 0),
         total_calculated_emissions_kg=round(total_emissions, 1),
         record_count=len(records),
         mode_breakdown=mode_breakdown,

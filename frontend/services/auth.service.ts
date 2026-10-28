@@ -1,6 +1,25 @@
 import type { AccountType, UserProfile, UserSession } from '../types/auth'
+import { apiClient, TOKEN_STORAGE_KEY } from './api-client'
 
 export const SESSION_STORAGE_KEY = 'carboniq_session'
+
+export interface BackendUserProfile {
+  id: string
+  full_name: string
+  email: string
+  workspace_id: string
+  workspace_name: string
+  account_type?: string
+  created_at: string
+  avatar_url?: string
+  initials: string
+}
+
+export interface BackendTokenResponse {
+  access_token: string
+  token_type: string
+  user: BackendUserProfile
+}
 
 /**
  * Computes a two-letter uppercase initial pair from a full name.
@@ -47,6 +66,13 @@ export const DEFAULT_DEMO_SESSION: UserSession = {
   createdAt: '2026-10-01T00:00:00.000Z',
 }
 
+function normalizeAccountType(raw?: string): AccountType {
+  const lower = (raw || '').toLowerCase().trim()
+  if (lower === 'college') return 'college'
+  if (lower === 'organization') return 'organization'
+  return 'individual'
+}
+
 function isValidSession(session: any): session is UserSession {
   if (!session || typeof session !== 'object') return false
   if (session.mode !== 'demo' && session.mode !== 'authenticated') return false
@@ -59,10 +85,37 @@ function isValidSession(session: any): session is UserSession {
 }
 
 /**
- * Frontend auth service managing demo and authenticated sessions.
- * Never stores passwords. Prepares clean signatures for FastAPI endpoints.
+ * Frontend auth service managing real FastAPI backend authentication and demo sessions.
+ * Never stores plaintext passwords. Stores JWT securely in localStorage.
  */
 export const authService = {
+  getToken(): string | null {
+    if (typeof window === 'undefined') return null
+    try {
+      return localStorage.getItem(TOKEN_STORAGE_KEY)
+    } catch {
+      return null
+    }
+  },
+
+  saveToken(token: string): void {
+    if (typeof window === 'undefined') return
+    try {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token)
+    } catch {
+      // Storage unavailable
+    }
+  },
+
+  clearToken(): void {
+    if (typeof window === 'undefined') return
+    try {
+      localStorage.removeItem(TOKEN_STORAGE_KEY)
+    } catch {
+      // Storage unavailable
+    }
+  },
+
   getStoredSession(): UserSession | null {
     if (typeof window === 'undefined') return null
     try {
@@ -70,16 +123,20 @@ export const authService = {
       if (!stored) return null
       const parsed = JSON.parse(stored)
       if (isValidSession(parsed)) {
-        const rawAccountType = parsed.user.accountType
-        const safeAccountType: AccountType =
-          rawAccountType === 'college' || rawAccountType === 'organization' ? rawAccountType : 'individual'
+        const safeAccountType = normalizeAccountType(parsed.user.accountType)
+        const token = this.getToken() || parsed.token
+        const isAuthenticated = Boolean(parsed.isAuthenticated && token)
+        const mode = isAuthenticated ? 'authenticated' : 'demo'
 
         return {
           ...parsed,
+          mode,
+          isAuthenticated,
+          token: token || undefined,
           user: {
             ...parsed.user,
-            id: parsed.user.id || (parsed.mode === 'demo' ? 'demo-user-aarav' : 'user-auth'),
-            workspaceName: parsed.user.workspaceName || (parsed.mode === 'demo' ? 'Demo Workspace' : 'Sustainability Workspace'),
+            id: parsed.user.id || (mode === 'demo' ? 'demo-user-aarav' : 'user-auth'),
+            workspaceName: parsed.user.workspaceName || (mode === 'demo' ? 'Demo Workspace' : 'Sustainability Workspace'),
             accountType: safeAccountType,
             initials: parsed.user.initials || computeInitials(parsed.user.name),
           },
@@ -95,8 +152,120 @@ export const authService = {
     if (typeof window === 'undefined') return
     try {
       localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session))
+      if (session.token) {
+        this.saveToken(session.token)
+      }
     } catch {
-      // Storage unavailable or disabled in sandbox
+      // Storage unavailable
+    }
+  },
+
+  /**
+   * Real backend registration via POST /auth/register
+   */
+  async signUp(profile: {
+    name: string
+    email: string
+    password: string
+    accountType?: AccountType
+    workspaceName?: string
+  }): Promise<UserSession> {
+    const res = await apiClient.post<BackendTokenResponse>('/auth/register', {
+      full_name: profile.name.trim(),
+      email: profile.email.trim(),
+      password: profile.password,
+      account_type: profile.accountType || 'individual',
+      workspace_name: profile.workspaceName?.trim() || undefined,
+    })
+
+    const token = res.access_token
+    this.saveToken(token)
+
+    const session: UserSession = {
+      mode: 'authenticated',
+      isAuthenticated: true,
+      token,
+      user: {
+        id: res.user.id,
+        name: res.user.full_name,
+        email: res.user.email,
+        workspaceName: res.user.workspace_name,
+        accountType: normalizeAccountType(res.user.account_type),
+        initials: res.user.initials || computeInitials(res.user.full_name),
+        createdAt: res.user.created_at,
+        avatarUrl: res.user.avatar_url,
+      },
+      createdAt: new Date().toISOString(),
+    }
+
+    this.saveSession(session)
+    return session
+  },
+
+  /**
+   * Real backend login via POST /auth/login
+   */
+  async signIn(email: string, password: string): Promise<UserSession> {
+    const res = await apiClient.post<BackendTokenResponse>('/auth/login', {
+      email: email.trim(),
+      password,
+    })
+
+    const token = res.access_token
+    this.saveToken(token)
+
+    const session: UserSession = {
+      mode: 'authenticated',
+      isAuthenticated: true,
+      token,
+      user: {
+        id: res.user.id,
+        name: res.user.full_name,
+        email: res.user.email,
+        workspaceName: res.user.workspace_name,
+        accountType: normalizeAccountType(res.user.account_type),
+        initials: res.user.initials || computeInitials(res.user.full_name),
+        createdAt: res.user.created_at,
+        avatarUrl: res.user.avatar_url,
+      },
+      createdAt: new Date().toISOString(),
+    }
+
+    this.saveSession(session)
+    return session
+  },
+
+  /**
+   * Verifies current session against backend GET /auth/me
+   */
+  async verifySession(): Promise<UserSession | null> {
+    const token = this.getToken()
+    if (!token) return null
+
+    try {
+      const user = await apiClient.get<BackendUserProfile>('/auth/me', { token })
+      const session: UserSession = {
+        mode: 'authenticated',
+        isAuthenticated: true,
+        token,
+        user: {
+          id: user.id,
+          name: user.full_name,
+          email: user.email,
+          workspaceName: user.workspace_name,
+          accountType: normalizeAccountType(user.account_type),
+          initials: user.initials || computeInitials(user.full_name),
+          createdAt: user.created_at,
+          avatarUrl: user.avatar_url,
+        },
+        createdAt: new Date().toISOString(),
+      }
+      this.saveSession(session)
+      return session
+    } catch {
+      // Invalid/expired token
+      this.clearToken()
+      return null
     }
   },
 
@@ -123,13 +292,13 @@ export const authService = {
   ): UserSession {
     const name = providedName?.trim() || formatNameFromEmail(email)
     const session: UserSession = {
-      mode: 'authenticated',
-      isAuthenticated: true,
+      mode: 'demo',
+      isAuthenticated: false,
       user: {
         id: `user-${Date.now().toString(36)}`,
         name,
         email: email.trim(),
-        workspaceName: workspaceName?.trim() || 'Sustainability Workspace',
+        workspaceName: workspaceName?.trim() || 'Demo Workspace',
         accountType: accountType || 'individual',
         initials: computeInitials(name),
         createdAt: new Date().toISOString(),
@@ -149,13 +318,13 @@ export const authService = {
     const name = profile.name.trim()
     const safeAccountType: AccountType = profile.accountType || 'individual'
     const session: UserSession = {
-      mode: 'authenticated',
-      isAuthenticated: true,
+      mode: 'demo',
+      isAuthenticated: false,
       user: {
         id: `user-${Date.now().toString(36)}`,
         name,
         email: profile.email.trim(),
-        workspaceName: profile.workspaceName?.trim() || `${name}'s Workspace`,
+        workspaceName: profile.workspaceName?.trim() || `${name}'s Demo Workspace`,
         accountType: safeAccountType,
         initials: computeInitials(name),
         createdAt: new Date().toISOString(),
@@ -167,6 +336,7 @@ export const authService = {
   },
 
   signOut(): void {
+    this.clearToken()
     if (typeof window !== 'undefined') {
       try {
         localStorage.removeItem(SESSION_STORAGE_KEY)

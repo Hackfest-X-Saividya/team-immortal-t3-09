@@ -13,6 +13,9 @@ class TransportationEmissionsResult(BaseModel):
     calculation_method: str  # "actual_fuel" | "distance_efficiency_estimate" | "uncalculated"
     emission_factor_used: float
     factor_id: str
+    factor_source: Optional[str] = None
+    factor_version: Optional[str] = None
+    calculation_boundary: Optional[str] = None
     unit: str = "kg CO2e"
     is_valid: bool = True
     explanation: str
@@ -51,6 +54,9 @@ def calculate_transportation_emissions(
             calculation_method="actual_fuel",
             emission_factor_used=factor.value,
             factor_id=factor.factor_id,
+            factor_source=factor.source,
+            factor_version=factor.version,
+            calculation_boundary=factor.calculation_boundary,
             is_valid=True,
             explanation=(
                 f"Calculated from {fuel_consumed_liters} L of actual {normalized_fuel} consumed "
@@ -77,6 +83,9 @@ def calculate_transportation_emissions(
             calculation_method="distance_efficiency_estimate",
             emission_factor_used=factor.value,
             factor_id=factor.factor_id,
+            factor_source=factor.source,
+            factor_version=factor.version,
+            calculation_boundary=factor.calculation_boundary,
             is_valid=True,
             explanation=(
                 f"Estimated from {distance_km} km ÷ {fuel_efficiency_km_per_l} km/L = {estimated_fuel} L {normalized_fuel} "
@@ -95,6 +104,9 @@ def calculate_transportation_emissions(
         calculation_method="uncalculated",
         emission_factor_used=factor.value,
         factor_id=factor.factor_id,
+        factor_source=factor.source,
+        factor_version=factor.version,
+        calculation_boundary=factor.calculation_boundary,
         is_valid=False,
         explanation=(
             "Insufficient fuel or efficiency data. Enter actual fuel volume or both distance and fuel efficiency (km/L)."

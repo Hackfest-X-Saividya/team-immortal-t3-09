@@ -31,6 +31,7 @@ export const EMISSION_FACTORS = {
     Composting: 0.10,
     Recycling: -0.45, // Net negative / avoided emissions benefit
     Landfill: 1.25, // Anaerobic decomposition factor
+    Incineration: 0.42, // Thermal oxidation factor
     'Other / Unknown': 0.50,
   } as Record<WasteTreatmentMethod, number>,
 }

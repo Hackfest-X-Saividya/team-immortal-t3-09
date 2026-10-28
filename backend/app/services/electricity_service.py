@@ -19,7 +19,7 @@ async def create_electricity_record(
     user_id: str,
     db: Any,
 ) -> ElectricityRecordResponse:
-    calc = calculate_electricity_emissions(req.consumption_kwh)
+    calc = calculate_electricity_emissions(req.consumption_kwh, source=req.source)
     now = utc_iso()
     record_id = generate_id("elec")
 
@@ -29,12 +29,17 @@ async def create_electricity_record(
         "creator_id": user_id,
         "reporting_month": req.reporting_month,
         "consumption_kwh": req.consumption_kwh,
+        "source": req.source or "Grid",
         "bill_amount_inr": req.bill_amount_inr,
         "building_or_department": req.building_or_department,
         "notes": req.notes,
         "calculated_emissions_kg": calc.calculated_emissions_kg,
         "emission_factor_used": calc.emission_factor_used,
+        "factor_id": calc.factor_id,
         "factor_type": calc.factor_type,
+        "factor_source": calc.factor_source,
+        "factor_version": calc.factor_version,
+        "calculation_boundary": calc.calculation_boundary,
         "created_at": now,
         "updated_at": now,
     }
@@ -57,6 +62,7 @@ async def list_electricity_records(
     records = []
     async for item in cursor:
         item.pop("_id", None)
+        item.setdefault("source", "Grid")
         records.append(ElectricityRecordResponse(**item))
     return records
 
@@ -70,6 +76,7 @@ async def get_electricity_record(
     if not doc:
         raise EntityNotFoundException(f"Electricity record {record_id} not found.")
     doc.pop("_id", None)
+    doc.setdefault("source", "Grid")
     return ElectricityRecordResponse(**doc)
 
 
@@ -85,13 +92,19 @@ async def update_electricity_record(
 
     updates: Dict[str, Any] = {"updated_at": utc_iso()}
     new_consumption = req.consumption_kwh if req.consumption_kwh is not None else doc["consumption_kwh"]
+    new_source = req.source if req.source is not None else doc.get("source", "Grid")
 
-    if req.consumption_kwh is not None:
-        calc = calculate_electricity_emissions(new_consumption)
+    if req.consumption_kwh is not None or req.source is not None:
+        calc = calculate_electricity_emissions(new_consumption, source=new_source)
         updates["consumption_kwh"] = new_consumption
+        updates["source"] = new_source
         updates["calculated_emissions_kg"] = calc.calculated_emissions_kg
         updates["emission_factor_used"] = calc.emission_factor_used
+        updates["factor_id"] = calc.factor_id
         updates["factor_type"] = calc.factor_type
+        updates["factor_source"] = calc.factor_source
+        updates["factor_version"] = calc.factor_version
+        updates["calculation_boundary"] = calc.calculation_boundary
 
     if req.reporting_month is not None:
         updates["reporting_month"] = req.reporting_month
@@ -105,6 +118,7 @@ async def update_electricity_record(
     await db.electricity_records.update_one({"id": record_id, "workspace_id": workspace_id}, {"$set": updates})
     updated_doc = await db.electricity_records.find_one({"id": record_id, "workspace_id": workspace_id})
     updated_doc.pop("_id", None)
+    updated_doc.setdefault("source", "Grid")
     return ElectricityRecordResponse(**updated_doc)
 
 
@@ -112,11 +126,11 @@ async def delete_electricity_record(
     record_id: str,
     workspace_id: str,
     db: Any,
-) -> bool:
+) -> Dict[str, Any]:
     res = await db.electricity_records.delete_one({"id": record_id, "workspace_id": workspace_id})
     if res.deleted_count == 0:
         raise EntityNotFoundException(f"Electricity record {record_id} not found.")
-    return True
+    return {"success": True, "deleted_id": record_id}
 
 
 async def get_electricity_summary(
@@ -127,6 +141,7 @@ async def get_electricity_summary(
     records = []
     async for item in cursor:
         item.pop("_id", None)
+        item.setdefault("source", "Grid")
         records.append(item)
 
     if not records:
@@ -140,50 +155,55 @@ async def get_electricity_summary(
             previous_period_comparison=None,
         )
 
-    total_kwh = sum(r.get("consumption_kwh", 0.0) for r in records)
-    total_bill = sum(r.get("bill_amount_inr", 0.0) or 0.0 for r in records)
-    total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in records)
+    total_kwh = sum(r["consumption_kwh"] for r in records)
+    total_bill = sum(r.get("bill_amount_inr") or 0.0 for r in records)
+    total_emissions = sum(r.get("calculated_emissions_kg") or 0.0 for r in records)
 
-    monthly_map = defaultdict(lambda: {"consumption_kwh": 0.0, "bill_amount_inr": 0.0, "calculated_emissions_kg": 0.0})
-    dept_map = defaultdict(float)
+    # Monthly Trends Aggregation
+    month_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"consumption_kwh": 0.0, "bill_amount_inr": 0.0, "emissions": 0.0})
+    dept_map: Dict[str, float] = defaultdict(float)
 
     for r in records:
-        m = r.get("reporting_month", "")
-        monthly_map[m]["consumption_kwh"] += r.get("consumption_kwh", 0.0)
-        monthly_map[m]["bill_amount_inr"] += r.get("bill_amount_inr", 0.0) or 0.0
-        monthly_map[m]["calculated_emissions_kg"] += r.get("calculated_emissions_kg", 0.0)
-        dept = r.get("building_or_department") or "Unassigned"
-        dept_map[dept] += r.get("consumption_kwh", 0.0)
+        m = r["reporting_month"]
+        month_map[m]["consumption_kwh"] += r["consumption_kwh"]
+        month_map[m]["bill_amount_inr"] += r.get("bill_amount_inr") or 0.0
+        month_map[m]["emissions"] += r.get("calculated_emissions_kg") or 0.0
 
-    sorted_months = sorted(monthly_map.keys())
-    trends = [
+        dept = r.get("building_or_department") or "Unassigned"
+        dept_map[dept] += r["consumption_kwh"]
+
+    monthly_trends = [
         MonthlyElectricityTrend(
             reporting_month=m,
-            consumption_kwh=round(monthly_map[m]["consumption_kwh"], 1),
-            bill_amount_inr=round(monthly_map[m]["bill_amount_inr"], 0),
-            calculated_emissions_kg=round(monthly_map[m]["calculated_emissions_kg"], 1),
+            consumption_kwh=round(data["consumption_kwh"], 1),
+            bill_amount_inr=round(data["bill_amount_inr"], 0),
+            calculated_emissions_kg=round(data["emissions"], 1),
         )
-        for m in sorted_months
+        for m, data in sorted(month_map.items())
     ]
 
     dept_breakdown = [
-        {"department": dept, "consumption_kwh": round(kwh, 1), "percentage": round((kwh / total_kwh) * 100, 1)}
-        for dept, kwh in dept_map.items()
+        {
+            "department": d,
+            "consumption_kwh": round(kwh, 1),
+            "percentage": round((kwh / total_kwh) * 100, 1) if total_kwh > 0 else 0.0,
+        }
+        for d, kwh in sorted(dept_map.items(), key=lambda x: x[1], reverse=True)
     ]
 
-    # Month over month comparison if at least 2 periods
-    prev_comparison = None
-    if len(trends) >= 2:
-        latest = trends[-1]
-        prev = trends[-2]
-        kwh_diff = round(latest.consumption_kwh - prev.consumption_kwh, 1)
-        pct_diff = round((kwh_diff / prev.consumption_kwh) * 100, 1) if prev.consumption_kwh > 0 else 0.0
-        prev_comparison = {
+    # Comparison of the latest two months
+    comparison = None
+    if len(monthly_trends) >= 2:
+        latest = monthly_trends[-1]
+        previous = monthly_trends[-2]
+        kwh_diff = round(latest.consumption_kwh - previous.consumption_kwh, 1)
+        pct_change = round((kwh_diff / previous.consumption_kwh) * 100, 1) if previous.consumption_kwh > 0 else 0.0
+        comparison = {
             "latest_month": latest.reporting_month,
-            "previous_month": prev.reporting_month,
-            "consumption_difference_kwh": kwh_diff,
-            "percentage_change": pct_diff,
-            "trend": "increased" if kwh_diff > 0 else "decreased" if kwh_diff < 0 else "unchanged",
+            "previous_month": previous.reporting_month,
+            "kwh_difference": kwh_diff,
+            "percentage_change": pct_change,
+            "trend_direction": "increased" if kwh_diff > 0 else "decreased" if kwh_diff < 0 else "unchanged",
         }
 
     return ElectricitySummaryResponse(
@@ -191,7 +211,7 @@ async def get_electricity_summary(
         total_bill_inr=round(total_bill, 0),
         total_calculated_emissions_kg=round(total_emissions, 1),
         record_count=len(records),
-        monthly_trends=trends,
+        monthly_trends=monthly_trends,
         department_breakdown=dept_breakdown,
-        previous_period_comparison=prev_comparison,
+        previous_period_comparison=comparison,
     )

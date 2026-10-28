@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     Application configuration loaded from environment variables or .env file.
     """
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", "backend/.env"),
         env_file_encoding="utf-8",
         extra="ignore"
     )
@@ -35,9 +35,25 @@ class Settings(BaseSettings):
     # CORS Settings
     FRONTEND_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    # Optional AI Assistant / LLM Provider
+    # Groq LLM Provider Settings (Primary)
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"
+
+    # Backward-compatibility fallback settings
     LLM_API_KEY: Optional[str] = None
-    LLM_MODEL: str = "gemini-1.5-flash"
+    LLM_MODEL: Optional[str] = None
+
+    @property
+    def effective_groq_api_key(self) -> Optional[str]:
+        return self.GROQ_API_KEY or self.LLM_API_KEY
+
+    @property
+    def effective_groq_model(self) -> str:
+        return self.GROQ_MODEL or self.LLM_MODEL or "qwen/qwen3.8-27b"
+
+    # ML Model Configuration
+    ML_MODEL_PATH: str = "carboniq_emissions_model.joblib"
+    ML_METADATA_PATH: str = "metrics.json"
 
     @property
     def cors_origins(self) -> List[str]:

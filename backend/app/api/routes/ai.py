@@ -35,3 +35,27 @@ async def query_waste_assistant(
 ) -> AiChatResponse:
     """Answers waste management and recycling inquiries using recorded streams."""
     return await AiAssistantService.query_waste_advisor(req.question, workspace_id, db)
+
+
+@router.post("/insights", response_model=AiChatResponse)
+async def query_insights_assistant(
+    req: AiChatRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    db: Any = Depends(get_db_dep),
+) -> AiChatResponse:
+    """
+    Experience 4: Main AI Insights Assistant.
+    Cross-category synthesis across Electricity, Transportation, Waste, historical trends,
+    and simulated reduction scenarios. Strictly grounded in backend calculated metrics.
+    """
+    return await AiAssistantService.query_insights_advisor(req.question, workspace_id, db)
+
+
+@router.post("/chat", response_model=AiChatResponse, include_in_schema=False)
+async def query_general_chat_alias(
+    req: AiChatRequest,
+    workspace_id: str = Depends(get_current_workspace_id),
+    db: Any = Depends(get_db_dep),
+) -> AiChatResponse:
+    """Backward-compatible alias for the main cross-category AI advisor."""
+    return await AiAssistantService.query_insights_advisor(req.question, workspace_id, db)

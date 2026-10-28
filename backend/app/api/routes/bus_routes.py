@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional, Union
 from fastapi import APIRouter, Body, Depends, Query, status
-from app.api.dependencies import get_current_user, get_current_workspace_id, get_db_dep
+from app.api.dependencies import get_current_user, get_current_workspace_id, get_db_dep, require_fleet_access
 from app.calculations.route_optimizer import RouteOptimizationProposal
 from app.schemas.bus_route import (
     BusRouteCreateRequest,
@@ -26,29 +26,28 @@ router = APIRouter(prefix="/transportation", tags=["Bus Route Management & Optim
 async def get_routes(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    workspace_id: str = Depends(get_current_workspace_id),
+    current_user: Dict[str, Any] = Depends(require_fleet_access),
     db: Any = Depends(get_db_dep),
 ) -> List[BusRouteResponse]:
     """Retrieves all registered bus routes in the workspace."""
-    return await list_bus_routes(workspace_id, db, skip=skip, limit=limit)
+    return await list_bus_routes(current_user["workspace_id"], db, skip=skip, limit=limit)
 
 
 @router.post("/routes", response_model=BusRouteResponse, status_code=status.HTTP_201_CREATED)
 async def create_route(
     req: BusRouteCreateRequest,
-    workspace_id: str = Depends(get_current_workspace_id),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_fleet_access),
     db: Any = Depends(get_db_dep),
 ) -> BusRouteResponse:
     """Creates a new bus route with student demand and vehicle capacity constraints."""
-    return await create_bus_route(req, workspace_id, current_user["id"], db)
+    return await create_bus_route(req, current_user["workspace_id"], current_user["id"], db)
 
 
 @router.post("/optimize", response_model=RouteOptimizationResponse)
 async def optimize_routes(
     payload: Optional[Union[RouteOptimizationRequest, List[str]]] = Body(None),
     route_ids: Optional[List[str]] = Query(None),
-    workspace_id: str = Depends(get_current_workspace_id),
+    current_user: Dict[str, Any] = Depends(require_fleet_access),
     db: Any = Depends(get_db_dep),
 ) -> RouteOptimizationResponse:
     """
@@ -63,21 +62,20 @@ async def optimize_routes(
     elif route_ids is not None:
         target_ids = route_ids
 
-    return await optimize_workspace_bus_routes(workspace_id, db, route_ids=target_ids)
+    return await optimize_workspace_bus_routes(current_user["workspace_id"], db, route_ids=target_ids)
 
 
 @router.post("/optimize/accept", status_code=status.HTTP_201_CREATED)
 async def accept_proposal(
     proposal: RouteOptimizationProposal,
-    workspace_id: str = Depends(get_current_workspace_id),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(require_fleet_access),
     db: Any = Depends(get_db_dep),
 ) -> Dict[str, Any]:
     """
     Saves an optimization proposal as a planned intervention.
     Does NOT alter real bus schedules or assign students automatically.
     """
-    return await save_proposal_as_intervention(proposal, workspace_id, current_user["id"], db)
+    return await save_proposal_as_intervention(proposal, current_user["workspace_id"], current_user["id"], db)
 
 
 @router.get("/routes/{route_id}", response_model=BusRouteResponse)

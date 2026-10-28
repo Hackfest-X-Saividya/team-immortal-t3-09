@@ -1,20 +1,80 @@
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_validator
+from typing import Any, Dict, List, Optional, Union
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 SUPPORTED_FUEL_TYPES = ("Diesel", "Petrol", "CNG", "Electric")
 _FUEL_TYPE_MAP = {f.lower(): f for f in SUPPORTED_FUEL_TYPES}
 
 
 class TransportationCreateRequest(BaseModel):
-    date: str = Field(..., description="Date or period of travel (YYYY-MM-DD or YYYY-MM)")
-    mode: str = Field(..., description="Transport mode: Bus, Fleet Van, Car, Two-Wheeler, etc.")
-    distance_km: float = Field(..., ge=0, description="Total distance travelled in km")
-    fuel_type: Optional[str] = Field("Diesel", description="Diesel, Petrol, CNG, Electric")
-    fuel_consumed_liters: Optional[float] = Field(None, ge=0, description="Actual fuel consumed in Litres/kg")
-    fuel_efficiency_km_per_l: Optional[float] = Field(None, gt=0, description="Fuel efficiency in km/L")
-    fuel_expenditure_inr: Optional[float] = Field(None, ge=0, description="Fuel expense in INR")
-    vehicle_id: Optional[str] = Field(None, max_length=50)
-    passenger_count: Optional[int] = Field(None, ge=0)
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: str = Field(
+        ...,
+        validation_alias=AliasChoices("date", "reporting_period", "reportingPeriod", "period"),
+        description="Date or period of travel (YYYY-MM-DD or YYYY-MM)",
+    )
+    mode: str = Field(
+        ...,
+        validation_alias=AliasChoices("mode", "vehicle_type", "vehicleType"),
+        description="Transport mode: Bus, Fleet Van, Car, Two-Wheeler, Public Transit",
+    )
+    distance_km: float = Field(
+        ...,
+        validation_alias=AliasChoices("distance_km", "distanceKm", "distance"),
+        ge=0,
+        description="Total distance travelled in km",
+    )
+    fuel_type: Optional[str] = Field(
+        "Diesel",
+        validation_alias=AliasChoices("fuel_type", "fuelType"),
+        description="Diesel, Petrol, CNG, Electric",
+    )
+    fuel_consumed_liters: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_consumed_liters", "fuelConsumedLiters", "fuel_consumption", "fuelConsumed"),
+        ge=0,
+        description="Actual fuel consumed in Litres/kg",
+    )
+    fuel_efficiency_km_per_l: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_efficiency_km_per_l", "fuelEfficiencyKmPerL", "fuel_efficiency", "fuelEfficiency"),
+        gt=0,
+        description="Fuel efficiency in km/L",
+    )
+    fuel_expenditure_inr: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_expenditure_inr", "fuelExpenditureInr", "fuel_cost", "fuelCost"),
+        ge=0,
+        description="Fuel expense in INR",
+    )
+    vehicle_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("vehicle_id", "vehicleId", "bus_id", "busId"),
+        max_length=50,
+    )
+    passenger_count: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("passenger_count", "passengerCount", "passengers"),
+        ge=0,
+    )
+    vehicle_capacity: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("vehicle_capacity", "vehicleCapacity", "capacity", "seating_capacity", "seatingCapacity"),
+        ge=0,
+    )
+    route_name: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("route_name", "routeName"),
+        max_length=100,
+    )
+    pickup_locations: Optional[Union[List[str], str]] = Field(
+        None,
+        validation_alias=AliasChoices("pickup_locations", "pickupLocations", "start_location", "startLocation"),
+    )
+    destination: Optional[str] = Field(
+        None,
+        max_length=100,
+    )
     notes: Optional[str] = Field(None, max_length=500)
 
     @field_validator("fuel_type")
@@ -29,17 +89,74 @@ class TransportationCreateRequest(BaseModel):
             raise ValueError(f"Invalid fuel type '{v}'. Supported fuel types are: {supported}")
         return matched
 
+    @field_validator("pickup_locations")
+    @classmethod
+    def normalize_pickups(cls, v: Optional[Union[List[str], str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
 
 class TransportationUpdateRequest(BaseModel):
-    date: Optional[str] = None
-    mode: Optional[str] = None
-    distance_km: Optional[float] = Field(None, ge=0)
-    fuel_type: Optional[str] = None
-    fuel_consumed_liters: Optional[float] = Field(None, ge=0)
-    fuel_efficiency_km_per_l: Optional[float] = Field(None, gt=0)
-    fuel_expenditure_inr: Optional[float] = Field(None, ge=0)
-    vehicle_id: Optional[str] = None
-    passenger_count: Optional[int] = Field(None, ge=0)
+    model_config = ConfigDict(populate_by_name=True)
+
+    date: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("date", "reporting_period", "reportingPeriod", "period"),
+    )
+    mode: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("mode", "vehicle_type", "vehicleType"),
+    )
+    distance_km: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("distance_km", "distanceKm", "distance"),
+        ge=0,
+    )
+    fuel_type: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_type", "fuelType"),
+    )
+    fuel_consumed_liters: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_consumed_liters", "fuelConsumedLiters", "fuel_consumption", "fuelConsumed"),
+        ge=0,
+    )
+    fuel_efficiency_km_per_l: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_efficiency_km_per_l", "fuelEfficiencyKmPerL", "fuel_efficiency", "fuelEfficiency"),
+        gt=0,
+    )
+    fuel_expenditure_inr: Optional[float] = Field(
+        None,
+        validation_alias=AliasChoices("fuel_expenditure_inr", "fuelExpenditureInr", "fuel_cost", "fuelCost"),
+        ge=0,
+    )
+    vehicle_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("vehicle_id", "vehicleId", "bus_id", "busId"),
+    )
+    passenger_count: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("passenger_count", "passengerCount", "passengers"),
+        ge=0,
+    )
+    vehicle_capacity: Optional[int] = Field(
+        None,
+        validation_alias=AliasChoices("vehicle_capacity", "vehicleCapacity", "capacity", "seating_capacity", "seatingCapacity"),
+        ge=0,
+    )
+    route_name: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("route_name", "routeName"),
+    )
+    pickup_locations: Optional[Union[List[str], str]] = Field(
+        None,
+        validation_alias=AliasChoices("pickup_locations", "pickupLocations", "start_location", "startLocation"),
+    )
+    destination: Optional[str] = None
     notes: Optional[str] = None
 
     @field_validator("fuel_type")
@@ -54,6 +171,15 @@ class TransportationUpdateRequest(BaseModel):
             raise ValueError(f"Invalid fuel type '{v}'. Supported fuel types are: {supported}")
         return matched
 
+    @field_validator("pickup_locations")
+    @classmethod
+    def normalize_pickups(cls, v: Optional[Union[List[str], str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
 
 class TransportationRecordResponse(BaseModel):
     id: str
@@ -67,9 +193,18 @@ class TransportationRecordResponse(BaseModel):
     fuel_expenditure_inr: Optional[float] = None
     vehicle_id: Optional[str] = None
     passenger_count: Optional[int] = None
+    vehicle_capacity: Optional[int] = None
+    route_name: Optional[str] = None
+    pickup_locations: Optional[List[str]] = None
+    destination: Optional[str] = None
     notes: Optional[str] = None
     calculation_method: str
     calculated_emissions_kg: float
+    emission_factor_used: Optional[float] = None
+    factor_id: Optional[str] = None
+    factor_source: Optional[str] = None
+    factor_version: Optional[str] = None
+    calculation_boundary: Optional[str] = None
     created_at: str
     updated_at: str
 

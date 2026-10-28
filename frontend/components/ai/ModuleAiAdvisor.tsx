@@ -11,28 +11,41 @@ import {
 } from 'lucide-react'
 import { Card } from '@/components/ui/Card'
 import { Pill } from '@/components/ui/Pill'
+import { AIResponseRenderer, type AICategory } from '@/components/ai/AIResponseRenderer'
 import type { AiChatMessage } from '@/types/sustainability'
 
 export interface ModuleAiAdvisorProps {
   title: string
   subtitle: string
   badgeText?: string
-  suggestedQuestions: string[]
+  suggestedQuestions?: string[]
   onQuery: (question: string) => Promise<AiChatMessage>
   emptyStateDescription?: string
+  category?: AICategory
 }
 
 export function ModuleAiAdvisor({
   title,
   subtitle,
   badgeText = 'DATA-GROUNDED ADVISOR',
-  suggestedQuestions,
+  suggestedQuestions = [],
   onQuery,
   emptyStateDescription,
+  category,
 }: ModuleAiAdvisorProps) {
   const [messages, setMessages] = useState<AiChatMessage[]>([])
   const [input, setInput] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
+
+  const resolvedCategory: AICategory =
+    category ||
+    (title.toLowerCase().includes('elec')
+      ? 'electricity'
+      : title.toLowerCase().includes('transport') || title.toLowerCase().includes('fleet')
+      ? 'transportation'
+      : title.toLowerCase().includes('waste')
+      ? 'waste'
+      : 'general')
 
   const handleAsk = async (question: string) => {
     const q = question.trim()
@@ -100,26 +113,6 @@ export function ModuleAiAdvisor({
         )}
       </div>
 
-      {/* Suggested Question Chips */}
-      <div className="mt-4">
-        <p className="text-[11px] font-medium uppercase tracking-[.14em] text-[#9AA69C]">
-          Suggested Questions
-        </p>
-        <div className="mt-2.5 flex flex-wrap gap-2">
-          {suggestedQuestions.map((sq) => (
-            <button
-              key={sq}
-              type="button"
-              onClick={() => handleAsk(sq)}
-              disabled={isProcessing}
-              className="rounded-full border border-[#DCE5DA] bg-[#F8FAF6] px-3.5 py-1.5 text-xs font-medium text-[#465B4E] transition-all hover:border-[#98BA93] hover:bg-[#EEF5EC] hover:text-[#285943] cursor-pointer disabled:opacity-50"
-            >
-              {sq}
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* Conversation Thread */}
       <div className="mt-6 rounded-2xl border border-[#E3EAE1] bg-[#FAFCF8] p-4 sm:p-5">
         {messages.length === 0 ? (
@@ -132,100 +125,36 @@ export function ModuleAiAdvisor({
             </p>
             <p className="mx-auto mt-1 max-w-[500px] text-xs leading-5 text-[#829286]">
               {emptyStateDescription ||
-                'Select a suggested question above or type your own question. The advisor evaluates your active records and applies calculation functions to provide verifiable estimates.'}
+                'Type your question below. The advisor evaluates your active records and applies verified calculation functions to provide grounded insights.'}
             </p>
           </div>
         ) : (
-          <div className="space-y-4 max-h-[460px] overflow-y-auto pr-1">
+          <div className="space-y-4 max-h-[520px] overflow-y-auto pr-1">
             {messages.map((msg) => (
               <div
                 key={msg.id}
                 className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                {msg.role === 'assistant' && (
-                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#285943] text-white">
-                    <BrainCircuit size={15} />
-                  </span>
-                )}
-
-                <div
-                  className={`max-w-[85%] rounded-2xl p-4 text-xs leading-6 ${
-                    msg.role === 'user'
-                      ? 'bg-[#285943] text-white font-medium rounded-tr-xs'
-                      : 'bg-white border border-[#E0E7DE] text-[#36493D] shadow-xs rounded-tl-xs'
-                  }`}
-                >
-                  <div className="whitespace-pre-line">{msg.content}</div>
-
-                  {/* Calculation Breakdown Card */}
-                  {msg.calculationBreakdown && (
-                    <div className="mt-3 rounded-xl border border-[#DCE6DA] bg-[#F7FAF5] p-3 text-xs text-[#455A4C]">
-                      <div className="flex items-center gap-1.5 font-semibold text-[#285943]">
-                        <Calculator size={13} />
-                        <span>Calculation Engine Breakdown</span>
-                      </div>
-
-                      <div className="mt-2 space-y-1.5 font-mono text-[11px]">
-                        <p className="text-[#677A6D]">
-                          <span className="font-semibold text-[#36493D]">Formula:</span>{' '}
-                          {msg.calculationBreakdown.formula}
-                        </p>
-                        <div className="border-t border-[#E8EFE5] pt-1.5">
-                          {Object.entries(msg.calculationBreakdown.inputs).map(([k, v]) => (
-                            <div key={k} className="flex justify-between">
-                              <span className="text-[#7A8D80]">{k}:</span>
-                              <span className="font-semibold text-[#2F4436]">{String(v)}</span>
-                            </div>
-                          ))}
-                        </div>
-                        {msg.calculationBreakdown.result && (
-                          <div className="border-t border-[#DDE7DA] pt-1.5 flex justify-between font-bold text-[#285943]">
-                            <span>Result:</span>
-                            <span>{msg.calculationBreakdown.result}</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {msg.calculationBreakdown.assumptions &&
-                        msg.calculationBreakdown.assumptions.length > 0 && (
-                          <div className="mt-2.5 border-t border-[#E8EFE5] pt-2 text-[10px] text-[#788B7E]">
-                            <span className="font-semibold text-[#506657]">Notes & Assumptions:</span>
-                            <ul className="mt-1 list-disc pl-4 space-y-0.5">
-                              {msg.calculationBreakdown.assumptions.map((a, i) => (
-                                <li key={i}>{a}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
+                {msg.role === 'assistant' ? (
+                  <div className="w-full max-w-[98%] sm:max-w-[94%]">
+                    <AIResponseRenderer
+                      response={msg.content}
+                      structuredPayload={msg.structuredPayload}
+                      category={resolvedCategory}
+                      calculationBreakdown={msg.calculationBreakdown}
+                      timestamp={msg.timestamp}
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="max-w-[80%] rounded-2xl rounded-tr-xs bg-[#285943] px-4 py-3 text-xs sm:text-[13px] leading-relaxed text-white font-medium shadow-2xs">
+                      <div className="whitespace-pre-line">{msg.content}</div>
+                      <p className="mt-1 text-[10px] text-white/70 text-right">{msg.timestamp}</p>
                     </div>
-                  )}
-
-                  {/* Follow-up question chips */}
-                  {msg.suggestedFollowUps && msg.suggestedFollowUps.length > 0 && (
-                    <div className="mt-3 pt-2.5 border-t border-[#EEF3EC]">
-                      <p className="text-[10px] font-semibold text-[#7E9083]">Follow-up questions:</p>
-                      <div className="mt-1.5 flex flex-wrap gap-1.5">
-                        {msg.suggestedFollowUps.map((fu) => (
-                          <button
-                            key={fu}
-                            type="button"
-                            onClick={() => handleAsk(fu)}
-                            className="rounded-lg bg-[#F0F5ED] px-2 py-1 text-[11px] font-medium text-[#285943] hover:bg-[#E3EFE0] cursor-pointer"
-                          >
-                            {fu}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <p className="mt-2 text-[10px] opacity-60 text-right">{msg.timestamp}</p>
-                </div>
-
-                {msg.role === 'user' && (
-                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#DDEBDD] text-[#285943]">
-                    <User size={15} />
-                  </span>
+                    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#DDEBDD] text-[#285943]">
+                      <User size={15} />
+                    </span>
+                  </>
                 )}
               </div>
             ))}

@@ -10,6 +10,9 @@ class WasteEmissionsResult(BaseModel):
     calculated_emissions_kg: float
     emission_factor_used: Optional[float]
     factor_id: Optional[str]
+    factor_source: Optional[str] = None
+    factor_version: Optional[str] = None
+    calculation_boundary: Optional[str] = None
     unit: str = "kg CO2e"
     is_valid: bool = True
     explanation: str
@@ -23,7 +26,7 @@ def calculate_waste_emissions(
     """
     Calculates waste emissions from quantity in kg and treatment method.
     Negative emission factor indicates avoided virgin material emissions (Recycling).
-    Positive emission factor indicates net greenhouse gas generation (Landfill / Composting).
+    Positive emission factor indicates net greenhouse gas generation (Landfill / Composting / Incineration).
     """
     if quantity_kg is None or quantity_kg < 0:
         return WasteEmissionsResult(
@@ -41,6 +44,8 @@ def calculate_waste_emissions(
         "composting": "waste_composting",
         "recycling": "waste_recycling",
         "landfill": "waste_landfill",
+        "incineration": "waste_incineration",
+        "waste-to-energy": "waste_incineration",
         "other / unknown": "waste_other",
         "other": "waste_other",
     }
@@ -56,6 +61,9 @@ def calculate_waste_emissions(
         calculated_emissions_kg=emissions,
         emission_factor_used=factor.value,
         factor_id=factor.factor_id,
+        factor_source=factor.source,
+        factor_version=factor.version,
+        calculation_boundary=factor.calculation_boundary,
         is_valid=True,
         explanation=(
             f"Calculated from {quantity_kg} kg via {factor.sub_category} "

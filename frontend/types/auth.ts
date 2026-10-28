@@ -18,6 +18,7 @@ export interface UserSession {
   isAuthenticated: boolean
   user: UserProfile
   createdAt: string
+  token?: string
 }
 
 export type AuthMode = 'signin' | 'signup'

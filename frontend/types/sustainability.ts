@@ -51,12 +51,16 @@ export interface ElectricityRecord {
   id: string
   reportingMonth: string // YYYY-MM
   consumptionKwh: number
+  source?: string
   billAmountInr?: number
   buildingOrDepartment?: string
   notes?: string
   calculatedEmissionsKg: number
   emissionFactorUsed: number // kg CO2e / kWh
-  factorType: 'illustrative_grid_factor' | 'measured'
+  factorType: string
+  factorSource?: string
+  factorVersion?: string
+  calculationBoundary?: string
   createdAt: string
 }
 
@@ -77,9 +81,16 @@ export interface TransportationRecord {
   fuelExpenditureInr?: number
   vehicleId?: string
   passengerCount?: number
+  vehicleCapacity?: number
+  routeName?: string
+  pickupLocations?: string[]
+  destination?: string
   notes?: string
   calculationMethod: 'actual_fuel' | 'distance_efficiency_estimate' | 'uncalculated'
   calculatedEmissionsKg: number
+  factorSource?: string
+  factorVersion?: string
+  calculationBoundary?: string
   createdAt: string
 }
 
@@ -142,13 +153,14 @@ export interface RouteOptimizationProposal {
  * Waste Record model
  */
 export type WasteCategory = 'Biodegradable' | 'Recyclable' | 'General' | 'E-waste'
-export type WasteTreatmentMethod = 'Composting' | 'Recycling' | 'Landfill' | 'Other / Unknown'
+export type WasteTreatmentMethod = 'Composting' | 'Recycling' | 'Landfill' | 'Incineration' | 'Other / Unknown'
 
 export interface WasteRecord {
   id: string
   date: string // YYYY-MM-DD or YYYY-MM
   category: WasteCategory
   quantityKg: number
+  unit?: string
   treatmentMethod?: WasteTreatmentMethod
   buildingOrDepartment?: string
   collectionProvider?: string
@@ -156,8 +168,48 @@ export interface WasteRecord {
   notes?: string
   calculatedEmissionsKg: number
   emissionFactorUsed?: number
+  factorSource?: string
+  factorVersion?: string
+  calculationBoundary?: string
   status: 'Verified' | 'Estimated' | 'Pending'
   createdAt: string
+}
+
+export interface MetricItem {
+  label: string
+  value: string | number
+  unit?: string
+  subtext?: string
+  trend?: 'up' | 'down' | 'neutral'
+}
+
+export interface KeyFindingItem {
+  title?: string
+  description: string
+  category?: string
+}
+
+export interface RecommendationItem {
+  title: string
+  explanation?: string
+  priority?: 'High' | 'Medium' | 'Low' | string
+  expected_benefit?: string
+  impact?: string
+  category?: string
+  action_url?: string
+  action_label?: string
+}
+
+export interface StructuredAiPayload {
+  intent?: 'direct' | 'comparative' | 'recommendation' | 'analytical' | 'comprehensive' | string
+  direct_answer: string
+  explanation?: string
+  reporting_period?: string
+  metrics?: MetricItem[]
+  key_findings?: KeyFindingItem[]
+  recommendations?: RecommendationItem[]
+  data_limitations?: string[]
+  confidence_score?: string | number
 }
 
 /**
@@ -175,4 +227,5 @@ export interface AiChatMessage {
     result: string
   }
   suggestedFollowUps?: string[]
+  structuredPayload?: StructuredAiPayload
 }

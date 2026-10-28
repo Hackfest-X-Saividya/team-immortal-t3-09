@@ -8,7 +8,10 @@ class ElectricityEmissionsResult(BaseModel):
     calculated_emissions_kg: float
     emission_factor_used: float
     factor_id: str
-    factor_type: str  # "illustrative_grid_factor" | "measured"
+    factor_type: str  # "authoritative_grid_factor" | "measured" | "illustrative_grid_factor"
+    factor_source: Optional[str] = None
+    factor_version: Optional[str] = None
+    calculation_boundary: Optional[str] = None
     unit: str = "kg CO2e"
     calculation_method: str = "consumption_kwh * grid_emission_factor"
     is_valid: bool = True
@@ -27,16 +30,21 @@ class ElectricitySavingsScenario(BaseModel):
 
 def calculate_electricity_emissions(
     consumption_kwh: float,
-    factor_id: str = "grid_in_cea_baseline"
+    factor_id: str = "grid_in_cea_baseline",
+    source: Optional[str] = None,
 ) -> ElectricityEmissionsResult:
     """
     Calculates electricity emissions based on consumption in kWh.
     Formula: Electricity emissions (kg CO2e) = consumption (kWh) × emission factor (kg CO2e/kWh)
+    Respects electricity generation source (e.g., Solar Rooftop vs Grid).
     """
-    factor = EMISSION_FACTORS.get(factor_id)
-    if not factor:
-        # Fallback to standard baseline factor if custom ID unknown
-        factor = EMISSION_FACTORS["grid_in_cea_baseline"]
+    # Check if electricity source is zero-emission renewable
+    if source and ("solar" in source.lower() or "rooftop" in source.lower()):
+        factor = EMISSION_FACTORS.get("electricity_solar_rooftop", EMISSION_FACTORS["grid_in_cea_baseline"])
+    else:
+        factor = EMISSION_FACTORS.get(factor_id, EMISSION_FACTORS["grid_in_cea_baseline"])
+
+    factor_type_str = "illustrative_grid_factor" if factor.factor_id == "grid_in_cea_baseline" else ("authoritative_grid_factor" if factor.is_authoritative else "measured")
 
     if consumption_kwh is None or consumption_kwh < 0:
         return ElectricityEmissionsResult(
@@ -44,7 +52,10 @@ def calculate_electricity_emissions(
             calculated_emissions_kg=0.0,
             emission_factor_used=factor.value,
             factor_id=factor.factor_id,
-            factor_type="illustrative_grid_factor" if not factor.is_authoritative else "measured",
+            factor_type=factor_type_str,
+            factor_source=factor.source,
+            factor_version=factor.version,
+            calculation_boundary=factor.calculation_boundary,
             is_valid=False,
             notes="Invalid consumption value. Must be a non-negative number.",
         )
@@ -55,7 +66,10 @@ def calculate_electricity_emissions(
         calculated_emissions_kg=emissions,
         emission_factor_used=factor.value,
         factor_id=factor.factor_id,
-        factor_type="illustrative_grid_factor" if not factor.is_authoritative else "measured",
+        factor_type=factor_type_str,
+        factor_source=factor.source,
+        factor_version=factor.version,
+        calculation_boundary=factor.calculation_boundary,
         is_valid=True,
         notes=f"Calculated with {factor.source} ({factor.value} {factor.unit}).",
     )
@@ -88,7 +102,7 @@ def calculate_electricity_savings_scenario(
         emissions_reduction_kg=emissions_reduction,
         tariff_inr_per_kwh=tariff,
         assumptions=[
-            f"Illustrative grid emission factor: {factor.value} kg CO2e/kWh ({factor.source}).",
+            f"Emission factor: {factor.value} {factor.unit} ({factor.source}).",
             f"Estimated variable electricity tariff: INR {tariff}/kWh (excluding fixed meter and demand charges).",
         ],
     )

@@ -34,7 +34,7 @@ async def get_dashboard_summary(
         monthly_emissions_map[t["month"]] += t["emissions_kg"]
 
     sorted_trends = [
-        {"month": m, "emissions_kg": round(val, 1)}
+        {"month": m, "emissions_kg": round(val, 1), "value": round(val, 1)}
         for m, val in sorted(monthly_emissions_map.items())
     ]
 
@@ -72,23 +72,32 @@ async def get_dashboard_summary(
         total_emissions_kg=total_emissions,
         electricity={
             "consumption_kwh": elec.total_consumption_kwh,
+            "total_kwh": elec.total_consumption_kwh,
             "cost_inr": elec.total_bill_inr,
             "emissions_kg": elec.total_calculated_emissions_kg,
             "records": elec.record_count,
+            "record_count": elec.record_count,
         },
         transportation={
             "distance_km": trans.total_distance_km,
+            "total_distance_km": trans.total_distance_km,
             "fuel_liters": trans.total_fuel_liters,
+            "total_liters": trans.total_fuel_liters,
             "expenditure_inr": trans.total_expenditure_inr,
+            "cost_inr": trans.total_expenditure_inr,
             "emissions_kg": trans.total_calculated_emissions_kg,
             "records": trans.record_count,
+            "record_count": trans.record_count,
         },
         waste={
             "total_kg": waste.total_waste_kg,
+            "total_weight_kg": waste.total_waste_kg,
             "recycled_kg": waste.recycled_waste_kg,
             "recycling_rate_percent": waste.recycling_rate_percent,
+            "recovery_rate_pct": waste.recycling_rate_percent,
             "emissions_kg": waste.total_calculated_emissions_kg,
             "records": waste.record_count,
+            "record_count": waste.record_count,
         },
         monthly_emissions_trend=sorted_trends,
         category_breakdown=category_breakdown,
@@ -115,7 +124,10 @@ async def get_dashboard_trends(
         monthly_costs_map[t["month"]] += t["fuel_expenditure_inr"]
 
     all_months = sorted(set(list(monthly_emissions_map.keys()) + list(monthly_costs_map.keys())))
-    emissions_list = [{"month": m, "emissions_kg": round(monthly_emissions_map[m], 1)} for m in all_months]
+    emissions_list = [
+        {"month": m, "emissions_kg": round(monthly_emissions_map[m], 1), "value": round(monthly_emissions_map[m], 1)}
+        for m in all_months
+    ]
     costs_list = [{"month": m, "cost_inr": round(monthly_costs_map[m], 0)} for m in all_months]
 
     return DashboardTrendsResponse(

@@ -1,27 +1,166 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Card } from '@/components/ui/Card'
 import { PageTitle } from '@/components/ui/PageTitle'
 import { Pill } from '@/components/ui/Pill'
+import { useAuth } from '@/context/auth-context'
 import { calculateSavingsProjection } from '@/lib/calculations'
+import { apiClient } from '@/services/api-client'
+
+interface BackendSimResult {
+  module: string
+  baseline: Record<string, any>
+  proposed: Record<string, any>
+  difference: Record<string, any>
+  estimated_cost_savings_inr: number
+  estimated_emissions_reduction_kg: number
+  assumptions: string[]
+  limitations: string
+}
 
 export function SimulatorView() {
+  const { session, token } = useAuth()
+  const isAuth = Boolean(session.isAuthenticated && token)
+
   const [elec, setElec] = useState(15)
   const [transport, setTransport] = useState(10)
   const [wasteR, setWasteR] = useState(20)
 
-  const {
-    savingsMonthly,
-    emissionsImprovementPercent,
-    proposedEmissions,
-    projectedKwhReduction,
-    projectedWasteReduction,
-  } = calculateSavingsProjection({
+  const [backendSavings, setBackendSavings] = useState<{
+    savingsMonthly: number
+    emissionsImprovementPercent: number
+    currentEmissions: number
+    proposedEmissions: number
+    projectedKwhReduction: number
+    projectedWasteReduction: number
+    assumptions: string[]
+  } | null>(null)
+
+  // Client-side fallback projection
+  const clientFallback = calculateSavingsProjection({
     electricityReduction: elec,
     transportReduction: transport,
     wasteReduction: wasteR,
   })
+
+  const runBackendSimulation = useCallback(async () => {
+    if (!isAuth || !token) return
+    try {
+      const [elecRes, transRes, wasteRes] = await Promise.allSettled([
+        apiClient.post<BackendSimResult>(
+          '/simulator/electricity',
+          { percent_reduction: elec },
+          { token }
+        ),
+        apiClient.post<BackendSimResult>(
+          '/simulator/transportation',
+          { percent_distance_reduction: transport },
+          { token }
+        ),
+        apiClient.post<BackendSimResult>(
+          '/simulator/waste',
+          { percent_reduction: wasteR },
+          { token }
+        ),
+      ])
+
+      const elecData = elecRes.status === 'fulfilled' ? elecRes.value : null
+      const transData = transRes.status === 'fulfilled' ? transRes.value : null
+      const wasteData = wasteRes.status === 'fulfilled' ? wasteRes.value : null
+
+      const totalSavingsInr =
+        (elecData?.estimated_cost_savings_inr || 0) +
+        (transData?.estimated_cost_savings_inr || 0) +
+        (wasteData?.estimated_cost_savings_inr || 0)
+
+      const baselineElec = Number(elecData?.baseline?.emissions_kg || 0)
+      const baselineTrans = Number(transData?.baseline?.emissions_kg || 0)
+      const baselineWaste = Number(wasteData?.baseline?.emissions_kg || 0)
+      const totalBaselineEmissions = baselineElec + baselineTrans + baselineWaste
+
+      const diffElec = Number(elecData?.estimated_emissions_reduction_kg || 0)
+      const diffTrans = Number(transData?.estimated_emissions_reduction_kg || 0)
+      const diffWaste = Number(wasteData?.estimated_emissions_reduction_kg || 0)
+      const totalReduction = diffElec + diffTrans + diffWaste
+
+      const proposed = Math.max(0, totalBaselineEmissions - totalReduction)
+      const improvementPct =
+        totalBaselineEmissions > 0
+          ? Math.round((totalReduction / totalBaselineEmissions) * 100)
+          : clientFallback.emissionsImprovementPercent
+
+      const kwhCut = Number(elecData?.difference?.kwh_reduction || 0)
+      const wasteCut = Number(wasteData?.difference?.waste_kg_reduction || 0)
+
+      const allAssumptions = [
+        ...(elecData?.assumptions || []),
+        ...(transData?.assumptions || []),
+        ...(wasteData?.assumptions || []),
+      ]
+
+      setBackendSavings({
+        savingsMonthly: Math.round(totalSavingsInr),
+        emissionsImprovementPercent: improvementPct,
+        currentEmissions: Math.round(totalBaselineEmissions),
+        proposedEmissions: Math.round(proposed),
+        projectedKwhReduction: kwhCut,
+        projectedWasteReduction: wasteCut,
+        assumptions: allAssumptions,
+      })
+    } catch {
+      setBackendSavings(null)
+    }
+  }, [isAuth, elec, transport, wasteR, clientFallback.emissionsImprovementPercent])
+
+  useEffect(() => {
+    if (isAuth) {
+      const timer = setTimeout(() => {
+        runBackendSimulation()
+      }, 150)
+      return () => clearTimeout(timer)
+    } else {
+      setBackendSavings(null)
+    }
+  }, [isAuth, elec, transport, wasteR, runBackendSimulation])
+
+  const hasBaselineData = Boolean(backendSavings && backendSavings.currentEmissions > 0)
+
+  const currentEmissionsDisplay = hasBaselineData
+    ? `${backendSavings!.currentEmissions.toLocaleString()} kg CO₂e`
+    : isAuth
+      ? '0 kg CO₂e (No baseline records logged)'
+      : '2,480 kg CO₂e (Demo baseline)'
+
+  const savingsMonthly = hasBaselineData
+    ? backendSavings!.savingsMonthly
+    : isAuth
+      ? 0
+      : clientFallback.savingsMonthly
+
+  const emissionsImprovementPercent = hasBaselineData
+    ? backendSavings!.emissionsImprovementPercent
+    : isAuth
+      ? 0
+      : clientFallback.emissionsImprovementPercent
+
+  const proposedEmissions = hasBaselineData
+    ? backendSavings!.proposedEmissions
+    : isAuth
+      ? 0
+      : clientFallback.proposedEmissions
+
+  const projectedKwhReduction = hasBaselineData
+    ? backendSavings!.projectedKwhReduction
+    : isAuth
+      ? 0
+      : clientFallback.projectedKwhReduction
+
+  const projectedWasteReduction = hasBaselineData
+    ? backendSavings!.projectedWasteReduction
+    : isAuth
+      ? 0
+      : clientFallback.projectedWasteReduction
 
   const sliders = [
     ['Electricity reduction', elec, setElec, 'Lower monthly kWh'],
@@ -30,10 +169,10 @@ export function SimulatorView() {
   ] as const
 
   const summaryRows = [
-    ['Current estimated emissions', '2,480 kg CO₂e'],
+    ['Current estimated emissions', currentEmissionsDisplay],
     ['Proposed emissions', `${proposedEmissions.toLocaleString()} kg CO₂e`],
-    ['Projected kWh reduction', `${projectedKwhReduction} kWh`],
-    ['Projected waste reduction', `${projectedWasteReduction} kg`],
+    ['Projected kWh reduction', `${projectedKwhReduction.toLocaleString()} kWh`],
+    ['Projected waste reduction', `${projectedWasteReduction.toLocaleString()} kg`],
   ]
 
   return (
@@ -42,7 +181,7 @@ export function SimulatorView() {
         eyebrow="WHAT-IF PLANNING"
         title="Savings simulator"
         description="Test a scenario before you commit. These are projections, not measured outcomes."
-        action={<Pill>Hypothetical scenario</Pill>}
+        action={<Pill tone={isAuth ? 'green' : 'amber'}>{isAuth ? 'Grounded scenario' : 'Hypothetical scenario'}</Pill>}
       />
 
       <div className="grid gap-5 xl:grid-cols-[1fr_.8fr]">
@@ -83,7 +222,7 @@ export function SimulatorView() {
                 Projected monthly opportunity
               </p>
               <span className="inline-flex items-center rounded-full bg-[#E7F1E5] px-2.5 py-0.5 text-[11px] font-semibold text-[#285943]">
-                Estimated
+                {backendSavings ? 'Backend Calculated' : 'Estimated'}
               </span>
             </div>
 
@@ -134,8 +273,8 @@ export function SimulatorView() {
 
       <div className="rounded-xl border border-[#DDD5A8] bg-[#FAF6E4] px-4 py-3 text-xs leading-5 text-[#4A4322]">
         <span className="font-semibold text-[#2D2810]">Important:</span> this simulator applies
-        illustrative assumptions shared across the demo modules. A projected improvement is not
-        proof of an achieved reduction.
+        verified backend algorithms to model hypothetical interventions. A projected improvement is
+        an actionable target and not proof of an already achieved reduction.
       </div>
     </div>
   )

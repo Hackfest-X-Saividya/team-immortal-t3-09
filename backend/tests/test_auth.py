@@ -105,3 +105,25 @@ async def test_protected_endpoint_me(async_client: AsyncClient, auth_header_help
     # Unauthorized request (tampered token)
     r_bad_token = await async_client.get("/api/auth/me", headers={"Authorization": "Bearer bad.token.value"})
     assert r_bad_token.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_individual_account_fleet_restriction(async_client: AsyncClient, auth_header_helper):
+    # Register individual account
+    reg_ind = {
+        "full_name": "Student Aarav",
+        "email": "aarav.student@carboniq.org",
+        "password": "Password123!",
+        "account_type": "individual",
+    }
+    r_ind = await async_client.post("/api/auth/register", json=reg_ind)
+    assert r_ind.status_code == 201
+    assert r_ind.json()["user"]["account_type"] == "individual"
+    ind_token = r_ind.json()["access_token"]
+    ind_headers = auth_header_helper(ind_token)
+
+    # Calling fleet routes as individual must be forbidden with 403
+    r_blocked = await async_client.get("/api/transportation/routes", headers=ind_headers)
+    assert r_blocked.status_code == 403
+    assert "restricted" in r_blocked.json()["detail"].lower()
+

@@ -28,6 +28,9 @@ export function TransportationRecordModal({
   const [fuelExpenditureInr, setFuelExpenditureInr] = useState<string>('')
   const [vehicleId, setVehicleId] = useState('')
   const [passengerCount, setPassengerCount] = useState<string>('')
+  const [vehicleCapacity, setVehicleCapacity] = useState<string>('')
+  const [routeName, setRouteName] = useState('')
+  const [destination, setDestination] = useState('')
   const [notes, setNotes] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -48,6 +51,9 @@ export function TransportationRecordModal({
       )
       setVehicleId(initialRecord.vehicleId || '')
       setPassengerCount(initialRecord.passengerCount ? String(initialRecord.passengerCount) : '')
+      setVehicleCapacity(initialRecord.vehicleCapacity ? String(initialRecord.vehicleCapacity) : '')
+      setRouteName(initialRecord.routeName || '')
+      setDestination(initialRecord.destination || '')
       setNotes(initialRecord.notes || '')
     } else {
       setDate('2026-10-28')
@@ -59,6 +65,9 @@ export function TransportationRecordModal({
       setFuelExpenditureInr('')
       setVehicleId('')
       setPassengerCount('')
+      setVehicleCapacity('')
+      setRouteName('')
+      setDestination('')
       setNotes('')
     }
     setError(null)
@@ -93,6 +102,7 @@ export function TransportationRecordModal({
 
     const cost = fuelExpenditureInr.trim() ? parseFloat(fuelExpenditureInr) : undefined
     const passengers = passengerCount.trim() ? parseInt(passengerCount, 10) : undefined
+    const capacity = vehicleCapacity.trim() ? parseInt(vehicleCapacity, 10) : undefined
 
     onSave(
       {
@@ -105,6 +115,9 @@ export function TransportationRecordModal({
         fuelExpenditureInr: cost && !isNaN(cost) ? cost : undefined,
         vehicleId: vehicleId.trim() || undefined,
         passengerCount: passengers && !isNaN(passengers) ? passengers : undefined,
+        vehicleCapacity: capacity && !isNaN(capacity) ? capacity : undefined,
+        routeName: routeName.trim() || undefined,
+        destination: destination.trim() || undefined,
         notes: notes.trim() || undefined,
         calculationMethod: calcResult.method,
         calculatedEmissionsKg: calcResult.emissionsKg,

@@ -1,4 +1,5 @@
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import AsyncClient
 
 
@@ -58,23 +59,30 @@ async def test_dashboard_summary_matches_stored_records(
 
 
 @pytest.mark.asyncio
-async def test_ai_electricity_advisor_rule_based_fallback(
+async def test_ai_electricity_advisor_with_groq_mock(
     async_client: AsyncClient,
     seeded_workspace,
 ):
     headers = seeded_workspace["headers"]
+    mock_choice = MagicMock()
+    mock_choice.message.content = "Under a 15% reduction scenario, saving 300 kWh saves approximately ₹2,400/month."
+    mock_resp = MagicMock(choices=[mock_choice])
 
-    # Ask for 15% reduction savings
-    q_payload = {"question": "How much can I save by reducing electricity usage by 15%?"}
-    r = await async_client.post("/api/ai/electricity", json=q_payload, headers=headers)
-    assert r.status_code == 200
-    res = r.json()
-    assert "calculation_breakdown" in res
-    assert res["calculation_breakdown"] is not None
-    # 2000 * 0.15 = 300 kWh reduction
-    assert "300.0 kWh" in res["calculation_breakdown"]["result"] or "300" in res["content"]
-    assert "₹" in res["content"]
-    assert len(res["suggested_follow_ups"]) > 0
+    with patch("app.core.config.settings.GROQ_API_KEY", "gsk_test"), \
+         patch("app.services.ai_assistant_service.AsyncGroq") as mock_groq_cls:
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(return_value=mock_resp)
+        mock_groq_cls.return_value = mock_instance
+
+        # Ask for 15% reduction savings
+        q_payload = {"question": "How much can I save by reducing electricity usage by 15%?"}
+        r = await async_client.post("/api/ai/electricity", json=q_payload, headers=headers)
+        assert r.status_code == 200
+        res = r.json()
+        assert "calculation_breakdown" in res
+        assert res["calculation_breakdown"] is not None
+        assert "300" in res["calculation_breakdown"]["result"] or "300" in res["content"]
+        assert len(res["suggested_follow_ups"]) > 0
 
 
 @pytest.mark.asyncio
@@ -83,11 +91,20 @@ async def test_ai_transportation_advisor(
     seeded_workspace,
 ):
     headers = seeded_workspace["headers"]
+    mock_choice = MagicMock()
+    mock_choice.message.content = "To reduce fleet emissions, combine overlapping corridors and conduct tire pressure audits."
+    mock_resp = MagicMock(choices=[mock_choice])
 
-    q_payload = {"question": "How can I reduce transportation emissions?"}
-    r = await async_client.post("/api/ai/transportation", json=q_payload, headers=headers)
-    assert r.status_code == 200
-    assert len(r.json()["content"]) > 20
+    with patch("app.core.config.settings.GROQ_API_KEY", "gsk_test"), \
+         patch("app.services.ai_assistant_service.AsyncGroq") as mock_groq_cls:
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(return_value=mock_resp)
+        mock_groq_cls.return_value = mock_instance
+
+        q_payload = {"question": "How can I reduce transportation emissions?"}
+        r = await async_client.post("/api/ai/transportation", json=q_payload, headers=headers)
+        assert r.status_code == 200
+        assert len(r.json()["content"]) > 20
 
 
 @pytest.mark.asyncio
@@ -96,11 +113,21 @@ async def test_ai_waste_advisor(
     seeded_workspace,
 ):
     headers = seeded_workspace["headers"]
+    mock_choice = MagicMock()
+    mock_choice.message.content = "General waste is your highest contributing stream at 200 kg."
+    mock_resp = MagicMock(choices=[mock_choice])
 
-    q_payload = {"question": "Which waste category contributes the most to our total waste?"}
-    r = await async_client.post("/api/ai/waste", json=q_payload, headers=headers)
-    assert r.status_code == 200
-    assert "General" in r.json()["content"]
+    with patch("app.core.config.settings.GROQ_API_KEY", "gsk_test"), \
+         patch("app.services.ai_assistant_service.AsyncGroq") as mock_groq_cls:
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(return_value=mock_resp)
+        mock_groq_cls.return_value = mock_instance
+
+        q_payload = {"question": "Which waste category contributes the most to our total waste?"}
+        r = await async_client.post("/api/ai/waste", json=q_payload, headers=headers)
+        assert r.status_code == 200
+        assert "General" in r.json()["content"]
+        assert r.json()["calculation_breakdown"] is not None
 
 
 @pytest.mark.asyncio

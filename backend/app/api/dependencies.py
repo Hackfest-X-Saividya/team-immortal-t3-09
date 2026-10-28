@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, Header
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
-from app.core.exceptions import DatabaseConnectionException, UnauthorizedException
+from app.core.exceptions import DatabaseConnectionException, ForbiddenException, UnauthorizedException
 from app.core.security import decode_access_token
 from app.db.mongodb import get_database
 
@@ -54,3 +54,17 @@ async def get_current_workspace_id(
     if not workspace_id:
         raise UnauthorizedException("No authorized workspace associated with current user.")
     return workspace_id
+
+
+async def require_fleet_access(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Enforces role-based access for transportation fleet and smart route optimization.
+    Individual / student accounts are restricted from fleet operations.
+    """
+    account_type = current_user.get("account_type", "college")
+    if account_type == "individual":
+        raise ForbiddenException("Fleet management and bus route optimization are restricted to College and Organization accounts.")
+    return current_user
+

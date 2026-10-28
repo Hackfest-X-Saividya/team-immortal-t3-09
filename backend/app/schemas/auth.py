@@ -7,6 +7,7 @@ class UserRegisterRequest(BaseModel):
     email: EmailStr = Field(..., description="Valid unique email address")
     password: str = Field(..., min_length=8, max_length=100, description="Minimum 8 characters password")
     workspace_name: Optional[str] = Field(None, max_length=100, description="Optional custom workspace title")
+    account_type: Optional[str] = Field("college", description="Account type: individual, college, organization")
 
     @field_validator("email")
     @classmethod
@@ -37,6 +38,7 @@ class UserProfileResponse(BaseModel):
     email: str
     workspace_id: str
     workspace_name: str
+    account_type: str = "individual"
     created_at: str
     avatar_url: Optional[str] = None
     initials: str

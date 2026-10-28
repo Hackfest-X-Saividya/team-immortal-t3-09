@@ -19,13 +19,15 @@ export interface AuthContextType {
   session: UserSession
   user: UserProfile
   isHydrated: boolean
-  signIn: (email: string, name?: string, workspaceName?: string, accountType?: AccountType) => void
+  token: string | null
+  signIn: (email: string, password?: string, name?: string, workspaceName?: string, accountType?: AccountType) => Promise<void>
   signUp: (profile: {
     name: string
     email: string
+    password?: string
     accountType?: AccountType
     workspaceName?: string
-  }) => void
+  }) => Promise<void>
   signOut: () => void
   isAccessModalOpen: boolean
   accessModalMessage?: string
@@ -43,30 +45,101 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAccessModalOpen, setIsAccessModalOpen] = useState(false)
   const [accessModalMessage, setAccessModalMessage] = useState<string | undefined>()
 
-  // Restore session from localStorage on initial mount
+  // Restore session from localStorage on initial mount and verify token against backend
   useEffect(() => {
-    const existing = authService.getStoredSession()
-    if (existing) {
-      setSession(existing)
-    } else {
-      const demo = authService.createDemoSession()
-      setSession(demo)
+    let isMounted = true
+
+    async function initSession() {
+      const existing = authService.getStoredSession()
+      const token = authService.getToken()
+
+      if (token && existing?.isAuthenticated) {
+        // Attempt verifying with backend /auth/me
+        try {
+          const verified = await authService.verifySession()
+          if (isMounted) {
+            if (verified) {
+              setSession(verified)
+            } else {
+              // Token was invalid or expired: clear token and fallback to demo session
+              authService.clearToken()
+              setSession(authService.createDemoSession())
+            }
+            setIsHydrated(true)
+          }
+          return
+        } catch {
+          // If network failed during verification, use cached existing session only if token is present
+          if (isMounted) {
+            if (existing && token) {
+              setSession(existing)
+            } else {
+              setSession(authService.createDemoSession())
+            }
+            setIsHydrated(true)
+          }
+          return
+        }
+      }
+
+      if (isMounted) {
+        if (existing && existing.isAuthenticated && token) {
+          setSession(existing)
+        } else if (existing && !existing.isAuthenticated) {
+          setSession(existing)
+        } else {
+          const demo = authService.createDemoSession()
+          setSession(demo)
+        }
+        setIsHydrated(true)
+      }
     }
-    setIsHydrated(true)
+
+    initSession()
+
+    return () => {
+      isMounted = false
+    }
   }, [])
 
   const signIn = useCallback(
-    (email: string, name?: string, workspaceName?: string, accountType?: AccountType) => {
-      const newSession = authService.signInDemo(email, name, workspaceName, accountType)
-      setSession(newSession)
+    async (email: string, password?: string, name?: string, workspaceName?: string, accountType?: AccountType) => {
+      if (password) {
+        // Real backend authentication
+        const newSession = await authService.signIn(email, password)
+        setSession(newSession)
+      } else {
+        // Demo authentication fallback
+        const newSession = authService.signInDemo(email, name, workspaceName, accountType)
+        setSession(newSession)
+      }
     },
     []
   )
 
   const signUp = useCallback(
-    (profile: { name: string; email: string; accountType?: AccountType; workspaceName?: string }) => {
-      const newSession = authService.signUpDemo(profile)
-      setSession(newSession)
+    async (profile: {
+      name: string
+      email: string
+      password?: string
+      accountType?: AccountType
+      workspaceName?: string
+    }) => {
+      if (profile.password) {
+        // Real backend registration
+        const newSession = await authService.signUp({
+          name: profile.name,
+          email: profile.email,
+          password: profile.password,
+          accountType: profile.accountType,
+          workspaceName: profile.workspaceName,
+        })
+        setSession(newSession)
+      } else {
+        // Demo signup fallback
+        const newSession = authService.signUpDemo(profile)
+        setSession(newSession)
+      }
     },
     []
   )
@@ -88,14 +161,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccessModalMessage(undefined)
   }, [])
 
+  const token = session.token || authService.getToken()
+  const isTrulyAuthenticated = Boolean(session.isAuthenticated && token)
+  const effectiveSession: UserSession = {
+    ...session,
+    isAuthenticated: isTrulyAuthenticated,
+    mode: isTrulyAuthenticated ? 'authenticated' : 'demo',
+    token: isTrulyAuthenticated ? token || undefined : undefined,
+  }
+  const user = session.user || DEFAULT_DEMO_USER
+
   /**
    * Guards data-mutating actions:
-   * Returns true if authenticated.
+   * Returns true if authenticated with valid token.
    * If in demo mode, opens the access modal and returns false.
    */
   const requestMutation = useCallback(
     (actionName?: string): boolean => {
-      if (session.isAuthenticated) {
+      if (isTrulyAuthenticated) {
         return true
       }
       const message = actionName
@@ -104,17 +187,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       openAccessModal(message)
       return false
     },
-    [session.isAuthenticated, openAccessModal]
+    [isTrulyAuthenticated, openAccessModal]
   )
-
-  const user = session.user || DEFAULT_DEMO_USER
 
   return (
     <AuthContext.Provider
       value={{
-        session,
+        session: effectiveSession,
         user,
         isHydrated,
+        token: isTrulyAuthenticated ? token : null,
         signIn,
         signUp,
         signOut,

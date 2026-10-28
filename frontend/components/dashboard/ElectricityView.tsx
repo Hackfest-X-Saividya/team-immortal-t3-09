@@ -1,11 +1,12 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Calendar,
   Cloud,
   Edit2,
   FileText,
+  Loader2,
   MoreHorizontal,
   Plus,
   Trash2,
@@ -28,8 +29,28 @@ import {
   calculateElectricitySavingsScenario,
   EMISSION_FACTORS,
 } from '@/lib/calculations'
+import { apiClient } from '@/services/api-client'
 import { aiAdvisorsService } from '@/services/ai-advisors.service'
 import type { ElectricityData, ElectricityRecord } from '@/types/sustainability'
+
+function mapBackendElectricity(raw: any): ElectricityRecord {
+  return {
+    id: raw.id,
+    reportingMonth: raw.reporting_month || raw.period || raw.month || '2026-10',
+    consumptionKwh: Number(raw.consumption_kwh) || 0,
+    source: raw.source || 'Grid',
+    billAmountInr: raw.bill_amount_inr != null ? Number(raw.bill_amount_inr) : undefined,
+    buildingOrDepartment: raw.building_or_department,
+    notes: raw.notes,
+    calculatedEmissionsKg: Number(raw.calculated_emissions_kg) || 0,
+    emissionFactorUsed: Number(raw.emission_factor_used) || 0.82,
+    factorType: raw.factor_type || 'illustrative_grid_factor',
+    factorSource: raw.factor_source,
+    factorVersion: raw.factor_version,
+    calculationBoundary: raw.calculation_boundary,
+    createdAt: raw.created_at || new Date().toISOString(),
+  }
+}
 
 const INITIAL_ELECTRICITY_RECORDS: ElectricityRecord[] = [
   {
@@ -107,12 +128,41 @@ const INITIAL_ELECTRICITY_RECORDS: ElectricityRecord[] = [
 ]
 
 export function ElectricityView() {
-  const { requestMutation } = useAuth()
-  const [records, setRecords] = useState<ElectricityRecord[]>(INITIAL_ELECTRICITY_RECORDS)
+  const { session, token, requestMutation } = useAuth()
+  const isAuth = Boolean(session.isAuthenticated && token)
+  const [records, setRecords] = useState<ElectricityRecord[]>(isAuth ? [] : INITIAL_ELECTRICITY_RECORDS)
+  const [isLoading, setIsLoading] = useState(false)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editingRecord, setEditingRecord] = useState<ElectricityRecord | null>(null)
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+
+  const fetchRecords = useCallback(async () => {
+    if (!isAuth || !token) return
+    setIsLoading(true)
+    try {
+      const data = await apiClient.get<any[]>('/electricity', { token })
+      if (Array.isArray(data)) {
+        setRecords(data.map(mapBackendElectricity))
+      }
+    } catch (err: any) {
+      if (err?.status === 401) {
+        setRecords(INITIAL_ELECTRICITY_RECORDS)
+        return
+      }
+      console.error('Failed to load electricity records:', err)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [isAuth, token])
+
+  useEffect(() => {
+    if (isAuth) {
+      fetchRecords()
+    } else {
+      setRecords(INITIAL_ELECTRICITY_RECORDS)
+    }
+  }, [isAuth, fetchRecords])
 
   // Derived metrics from actual active records
   const totalConsumptionKwh = useMemo(
@@ -168,37 +218,70 @@ export function ElectricityView() {
     setActiveMenuId(null)
   }
 
-  const handleDeleteRecord = (id: string) => {
+  const handleDeleteRecord = async (id: string) => {
     if (!requestMutation('delete electricity records')) return
-    setRecords((prev) => prev.filter((r) => r.id !== id))
+    if (isAuth) {
+      try {
+        await apiClient.delete(`/electricity/${id}`)
+        setToastMessage('Electricity record removed from database.')
+        await fetchRecords()
+      } catch (err: any) {
+        setToastMessage(err.message || 'Failed to remove electricity record.')
+      }
+    } else {
+      setRecords((prev) => prev.filter((r) => r.id !== id))
+      setToastMessage('Electricity record removed from workspace.')
+    }
     setActiveMenuId(null)
-    setToastMessage('Electricity record removed from workspace.')
   }
 
-  const handleSaveRecord = (
+  const handleSaveRecord = async (
     data: Omit<ElectricityRecord, 'id' | 'createdAt'>,
     existingId?: string
   ) => {
-    if (existingId) {
-      setRecords((prev) =>
-        prev.map((r) =>
-          r.id === existingId
-            ? {
-                ...r,
-                ...data,
-              }
-            : r
-        )
-      )
-      setToastMessage('Electricity record updated successfully.')
-    } else {
-      const newRec: ElectricityRecord = {
-        ...data,
-        id: `el-${Date.now()}`,
-        createdAt: new Date().toISOString(),
+    if (isAuth) {
+      try {
+        const payload = {
+          reporting_month: data.reportingMonth,
+          consumption_kwh: data.consumptionKwh,
+          source: data.source || 'Grid',
+          bill_amount_inr: data.billAmountInr,
+          building_or_department: data.buildingOrDepartment,
+          notes: data.notes,
+        }
+        if (existingId) {
+          await apiClient.put(`/electricity/${existingId}`, payload)
+          setToastMessage('Electricity record updated in database.')
+        } else {
+          await apiClient.post('/electricity', payload)
+          setToastMessage('Electricity record saved to database.')
+        }
+        await fetchRecords()
+      } catch (err: any) {
+        setToastMessage(err.message || 'Failed to save electricity record.')
       }
-      setRecords((prev) => [newRec, ...prev])
-      setToastMessage('Electricity record added to your active workspace.')
+    } else {
+      if (existingId) {
+        setRecords((prev) =>
+          prev.map((r) =>
+            r.id === existingId
+              ? {
+                  ...r,
+                  ...data,
+                }
+              : r
+          )
+        )
+        setToastMessage('Electricity record updated successfully.')
+      } else {
+        const newRec: ElectricityRecord = {
+          ...data,
+          id: `el-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+        }
+        setRecords((prev) => [newRec, ...prev])
+        setToastMessage('Electricity record added to your active workspace.')
+      }
     }
   }
 
@@ -312,69 +395,89 @@ export function ElectricityView() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EFF3EE] text-[#55675A]">
-              {records.map((rec) => (
-                <tr key={rec.id} className="hover:bg-[#FAFDF9]">
-                  <td className="py-3 font-medium text-[#2F4436]">
-                    <div className="flex items-center gap-1.5">
-                      <Calendar size={13} className="text-[#7A8E80]" />
-                      <span>{rec.reportingMonth}</span>
-                    </div>
-                  </td>
-                  <td className="py-3">{rec.buildingOrDepartment || 'Main Workspace'}</td>
-                  <td className="py-3 font-semibold text-[#285943]">
-                    {rec.consumptionKwh.toLocaleString()} kWh
-                  </td>
-                  <td className="py-3">
-                    {rec.billAmountInr ? `₹${rec.billAmountInr.toLocaleString('en-IN')}` : '—'}
-                  </td>
-                  <td className="py-3 font-medium text-[#3A5243]">
-                    {rec.calculatedEmissionsKg.toLocaleString()} kg CO₂e
-                  </td>
-                  <td className="py-3">
-                    <Pill tone="sage">0.82 kg/kWh</Pill>
-                  </td>
-                  <td className="py-3 text-right">
-                    <div className="relative inline-block text-left">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveMenuId(activeMenuId === rec.id ? null : rec.id)
-                        }
-                        aria-label="Record options"
-                        className="rounded-lg p-1 text-[#8A978D] hover:bg-[#EEF3EC] hover:text-[#285943] cursor-pointer"
-                      >
-                        <MoreHorizontal size={15} />
-                      </button>
-
-                      {activeMenuId === rec.id && (
-                        <>
-                          <div
-                            className="fixed inset-0 z-20"
-                            onClick={() => setActiveMenuId(null)}
-                            aria-hidden="true"
-                          />
-                          <div className="absolute right-0 top-7 z-30 w-36 rounded-xl border border-[#E0E7DE] bg-white p-1.5 shadow-lg animate-in fade-in duration-100">
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEditModal(rec)}
-                              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-[#526357] hover:bg-[#F3F7F1] cursor-pointer"
-                            >
-                              <Edit2 size={13} /> Edit
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteRecord(rec.id)}
-                              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-[#A35C49] hover:bg-[#FDF2F0] cursor-pointer"
-                            >
-                              <Trash2 size={13} /> Delete
-                            </button>
-                          </div>
-                        </>
-                      )}
+              {records.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-12 text-center text-[#748178]">
+                    <div className="mx-auto max-w-sm space-y-2">
+                      <Zap className="mx-auto h-8 w-8 text-[#A0B4A2]" />
+                      <p className="text-sm font-semibold text-[#285943]">No electricity records found</p>
+                      <p className="text-xs text-[#7A8E80]">
+                        Click &ldquo;Add record&rdquo; above to log your monthly kilowatt-hour consumption.
+                      </p>
                     </div>
                   </td>
                 </tr>
-              ))}
+              ) : (
+                records.map((rec) => (
+                  <tr key={rec.id} className="hover:bg-[#FAFDF9]">
+                    <td className="py-3 font-medium text-[#2F4436]">
+                      <div className="flex items-center gap-1.5">
+                        <Calendar size={13} className="text-[#7A8E80]" />
+                        <span>{rec.reportingMonth}</span>
+                      </div>
+                    </td>
+                    <td className="py-3">{rec.buildingOrDepartment || 'Main Workspace'}</td>
+                    <td className="py-3 font-semibold text-[#285943]">
+                      {rec.consumptionKwh.toLocaleString()} kWh
+                    </td>
+                    <td className="py-3">
+                      {rec.billAmountInr ? `₹${rec.billAmountInr.toLocaleString('en-IN')}` : '—'}
+                    </td>
+                    <td className="py-3 font-medium text-[#3A5243]">
+                      {rec.calculatedEmissionsKg.toLocaleString()} kg CO₂e
+                    </td>
+                    <td className="py-3">
+                      <Pill tone="sage">
+                        {rec.source === 'Solar Rooftop'
+                          ? '0.0 kg/kWh (Solar)'
+                          : rec.factorSource
+                            ? `${rec.emissionFactorUsed} kg/kWh (${rec.factorSource.split(' ')[0]})`
+                            : '0.82 kg/kWh'}
+                      </Pill>
+                    </td>
+                    <td className="py-3 text-right">
+                      <div className="relative inline-block text-left">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setActiveMenuId(activeMenuId === rec.id ? null : rec.id)
+                          }
+                          aria-label="Record options"
+                          className="rounded-lg p-1 text-[#8A978D] hover:bg-[#EEF3EC] hover:text-[#285943] cursor-pointer"
+                        >
+                          <MoreHorizontal size={15} />
+                        </button>
+
+                        {activeMenuId === rec.id && (
+                          <>
+                            <div
+                              className="fixed inset-0 z-20"
+                              onClick={() => setActiveMenuId(null)}
+                              aria-hidden="true"
+                            />
+                            <div className="absolute right-0 top-7 z-30 w-36 rounded-xl border border-[#E0E7DE] bg-white p-1.5 shadow-lg animate-in fade-in duration-100">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditModal(rec)}
+                                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-[#526357] hover:bg-[#F3F7F1] cursor-pointer"
+                              >
+                                <Edit2 size={13} /> Edit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteRecord(rec.id)}
+                                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium text-[#A35C49] hover:bg-[#FDF2F0] cursor-pointer"
+                              >
+                                <Trash2 size={13} /> Delete
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
@@ -382,6 +485,7 @@ export function ElectricityView() {
 
       {/* AI Electricity Advisor Section */}
       <ModuleAiAdvisor
+        category="electricity"
         title="AI Electricity Advisor"
         subtitle="Understand your energy consumption and discover opportunities to reduce electricity costs and emissions."
         suggestedQuestions={[

@@ -60,6 +60,68 @@ async def test_workspace_isolation_read_protection(
 
 
 @pytest.mark.asyncio
+async def test_cross_workspace_transportation_and_waste_isolation(
+    async_client: AsyncClient,
+    auth_header_helper,
+):
+    # Register Org 1
+    r1 = await async_client.post(
+        "/api/auth/register",
+        json={"full_name": "Org 1 Admin", "email": "org1@carboniq.org", "password": "Password123!", "account_type": "college"},
+    )
+    headers_1 = auth_header_helper(r1.json()["access_token"])
+
+    # Register Org 2
+    r2 = await async_client.post(
+        "/api/auth/register",
+        json={"full_name": "Org 2 Admin", "email": "org2@carboniq.org", "password": "Password123!", "account_type": "college"},
+    )
+    headers_2 = auth_header_helper(r2.json()["access_token"])
+
+    # Org 1 adds transportation, bus route, and waste
+    r_trans = await async_client.post(
+        "/api/transportation",
+        json={"date": "2026-10-20", "mode": "Bus", "distance_km": 150.0, "fuel_consumed_liters": 30.0},
+        headers=headers_1,
+    )
+    trans_id = r_trans.json()["id"]
+
+    r_route = await async_client.post(
+        "/api/transportation/routes",
+        json={
+            "route_name": "Org 1 Express",
+            "start_location": "Station",
+            "destination": "Campus",
+            "distance_km": 20.0,
+            "duration_minutes": 35,
+            "assigned_students": 30,
+            "seating_capacity": 40,
+            "bus_id": "BUS-ORG1-01",
+        },
+        headers=headers_1,
+    )
+    route_id = r_route.json()["id"]
+
+    r_waste = await async_client.post(
+        "/api/waste",
+        json={"date": "2026-10-21", "category": "General", "quantity_kg": 200.0, "treatment_method": "Landfill"},
+        headers=headers_1,
+    )
+    waste_id = r_waste.json()["id"]
+
+    # Org 2 must see 0 records in lists
+    assert len((await async_client.get("/api/transportation", headers=headers_2)).json()) == 0
+    assert len((await async_client.get("/api/transportation/routes", headers=headers_2)).json()) == 0
+    assert len((await async_client.get("/api/waste", headers=headers_2)).json()) == 0
+
+    # Org 2 must receive 404 for direct ID gets/updates/deletes
+    assert (await async_client.get(f"/api/transportation/{trans_id}", headers=headers_2)).status_code == 404
+    assert (await async_client.get(f"/api/waste/{waste_id}", headers=headers_2)).status_code == 404
+    assert (await async_client.delete(f"/api/transportation/{trans_id}", headers=headers_2)).status_code == 404
+    assert (await async_client.delete(f"/api/waste/{waste_id}", headers=headers_2)).status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_unauthenticated_requests_blocked(async_client: AsyncClient):
     protected_paths = [
         ("GET", "/api/auth/me"),

@@ -1,13 +1,13 @@
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, model_validator
 
 from app.calculations.route_optimizer import RouteOptimizationProposal
 
 
 class BusRouteCreateRequest(BaseModel):
     route_name: str = Field(..., min_length=2, max_length=100)
-    start_location: str = Field(..., min_length=2, max_length=100)
-    destination: str = Field(..., min_length=2, max_length=100)
+    start_location: str = Field(..., min_length=1, max_length=100)
+    destination: str = Field(..., min_length=1, max_length=100)
     intermediate_stops: List[str] = Field(default_factory=list)
     distance_km: float = Field(..., gt=0)
     duration_minutes: int = Field(..., gt=0)
@@ -23,12 +23,11 @@ class BusRouteCreateRequest(BaseModel):
     status: str = Field(default="active")  # "active" | "consolidated" | "under_review"
     notes: Optional[str] = None
 
-    @validator('assigned_students')
-    def check_capacity(cls, v, values):
-        capacity = values.get('seating_capacity')
-        if capacity is not None and v > capacity:
-            raise ValueError(f'assigned_students ({v}) exceeds seating_capacity ({capacity})')
-        return v
+    @model_validator(mode="after")
+    def check_capacity(self) -> "BusRouteCreateRequest":
+        if self.assigned_students > self.seating_capacity:
+            raise ValueError(f"assigned_students ({self.assigned_students}) exceeds seating_capacity ({self.seating_capacity})")
+        return self
 
 
 class BusRouteUpdateRequest(BaseModel):
