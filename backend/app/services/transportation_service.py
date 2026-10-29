@@ -180,30 +180,37 @@ async def get_transportation_summary(
             monthly_trends=[],
         )
 
-    total_dist = sum(r.get("distance_km", 0.0) for r in records)
+    total_dist = sum(float(r.get("distance_km") or r.get("distance") or 0.0) for r in records)
     total_fuel = sum(
-        (r.get("fuel_consumed_liters") or (r.get("distance_km", 0.0) / r["fuel_efficiency_km_per_l"] if r.get("fuel_efficiency_km_per_l") else 0.0))
+        float(r.get("fuel_consumed_liters") or r.get("fuel_liters") or (
+            (float(r.get("distance_km", 0.0) or 0.0) / float(r["fuel_efficiency_km_per_l"]))
+            if r.get("fuel_efficiency_km_per_l") and float(r["fuel_efficiency_km_per_l"]) > 0 else 0.0
+        ))
         for r in records
     )
-    total_expenditure = sum(r.get("fuel_expenditure_inr") or 0.0 for r in records)
-    total_emissions = sum(r.get("calculated_emissions_kg") or 0.0 for r in records)
+    total_expenditure = sum(float(r.get("fuel_expenditure_inr") or r.get("expenditure_inr") or 0.0) for r in records)
+    total_emissions = sum(float(r.get("calculated_emissions_kg") or r.get("emissions_kg") or 0.0) for r in records)
 
     mode_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"distance_km": 0.0, "emissions": 0.0, "trips": 0})
     month_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"distance_km": 0.0, "fuel_liters": 0.0, "emissions": 0.0})
 
     for r in records:
         mode = r.get("mode", "Other")
-        mode_map[mode]["distance_km"] += r.get("distance_km", 0.0)
-        mode_map[mode]["emissions"] += r.get("calculated_emissions_kg", 0.0)
+        dist = float(r.get("distance_km") or r.get("distance") or 0.0)
+        em = float(r.get("calculated_emissions_kg") or r.get("emissions_kg") or 0.0)
+        mode_map[mode]["distance_km"] += dist
+        mode_map[mode]["emissions"] += em
         mode_map[mode]["trips"] += 1
 
-        month_key = normalize_month(r["date"])
-        month_map[month_key]["distance_km"] += r.get("distance_km", 0.0)
-        month_map[month_key]["emissions"] += r.get("calculated_emissions_kg", 0.0)
+        raw_m = r.get("date") or r.get("reporting_month") or r.get("month") or "2026-01"
+        month_key = normalize_month(str(raw_m))
+        month_map[month_key]["distance_km"] += dist
+        month_map[month_key]["emissions"] += em
+        eff = float(r.get("fuel_efficiency_km_per_l") or 0.0)
         if r.get("fuel_consumed_liters"):
-            month_map[month_key]["fuel_liters"] += r["fuel_consumed_liters"]
-        elif r.get("fuel_efficiency_km_per_l"):
-            month_map[month_key]["fuel_liters"] += r["distance_km"] / r["fuel_efficiency_km_per_l"]
+            month_map[month_key]["fuel_liters"] += float(r["fuel_consumed_liters"])
+        elif eff > 0:
+            month_map[month_key]["fuel_liters"] += dist / eff
 
     mode_breakdown = [
         {

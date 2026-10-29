@@ -161,13 +161,19 @@ async def get_waste_summary(
             monthly_trends=[],
         )
 
-    total_qty = sum(r.get("quantity_kg", 0.0) for r in records)
+    def _safe_float(val, default=0.0) -> float:
+        try:
+            return float(val) if val is not None else default
+        except (ValueError, TypeError):
+            return default
+
+    total_qty = sum(_safe_float(r.get("quantity_kg") or r.get("quantity") or r.get("waste_kg")) for r in records)
     recycled_qty = sum(
-        r.get("quantity_kg", 0.0)
+        _safe_float(r.get("quantity_kg") or r.get("quantity") or r.get("waste_kg"))
         for r in records
-        if (r.get("treatment_method") or "").lower() == "recycling" or (r.get("category") or "").lower() == "recyclable"
+        if str(r.get("treatment_method") or "").strip().lower() == "recycling" or str(r.get("category") or "").strip().lower() == "recyclable"
     )
-    total_emissions = sum(r.get("calculated_emissions_kg") or 0.0 for r in records)
+    total_emissions = sum(_safe_float(r.get("calculated_emissions_kg") or r.get("emissions_kg")) for r in records)
     rec_rate = calculate_recycling_rate(recycled_qty, total_qty)
 
     cat_map: Dict[str, float] = defaultdict(float)
@@ -175,17 +181,19 @@ async def get_waste_summary(
     month_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"total_kg": 0.0, "recycled_kg": 0.0, "emissions": 0.0})
 
     for r in records:
-        cat = r.get("category") or "General"
-        treat = r.get("treatment_method") or "Other / Unknown"
-        qty = r.get("quantity_kg", 0.0)
+        cat = str(r.get("category") or "General")
+        treat = str(r.get("treatment_method") or "Other / Unknown")
+        qty = _safe_float(r.get("quantity_kg") or r.get("quantity") or r.get("waste_kg"))
+        em = _safe_float(r.get("calculated_emissions_kg") or r.get("emissions_kg"))
 
         cat_map[cat] += qty
         treat_map[treat] += qty
 
-        month_key = normalize_month(r["date"])
+        raw_d = r.get("date") or r.get("reporting_period") or r.get("reporting_month") or r.get("period") or "2026-01"
+        month_key = normalize_month(str(raw_d))
         month_map[month_key]["total_kg"] += qty
-        month_map[month_key]["emissions"] += r.get("calculated_emissions_kg", 0.0)
-        if treat.lower() == "recycling" or cat.lower() == "recyclable":
+        month_map[month_key]["emissions"] += em
+        if treat.strip().lower() == "recycling" or cat.strip().lower() == "recyclable":
             month_map[month_key]["recycled_kg"] += qty
 
     cat_breakdown = [

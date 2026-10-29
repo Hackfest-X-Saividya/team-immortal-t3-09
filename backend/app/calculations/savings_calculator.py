@@ -35,6 +35,7 @@ def simulate_electricity_savings(
             "consumption_kwh": baseline_kwh,
             "estimated_cost_inr": round(baseline_kwh * tariff, 0),
             "emissions_kg": round(baseline_kwh * factor, 1),
+            "has_records": baseline_kwh > 0,
         },
         proposed={
             "consumption_kwh": proposed_kwh,
@@ -83,6 +84,7 @@ def simulate_transportation_savings(
             "fuel_liters": baseline_fuel,
             "estimated_cost_inr": round(baseline_fuel * fuel_price, 0),
             "emissions_kg": round(baseline_fuel * factor, 1),
+            "has_records": baseline_distance_km > 0,
         },
         proposed={
             "distance_km": proposed_dist,
@@ -132,6 +134,7 @@ def simulate_waste_savings(
         baseline={
             "quantity_kg": baseline_quantity_kg,
             "emissions_kg": baseline_emissions,
+            "has_records": baseline_quantity_kg > 0,
         },
         proposed={
             "quantity_kg": proposed_qty,
@@ -141,6 +144,7 @@ def simulate_waste_savings(
         },
         difference={
             "quantity_reduction_kg": qty_diff,
+            "waste_kg_reduction": qty_diff,
             "recycled_kg": recycled_amount,
             "percent_reduction": safe_percent,
         },

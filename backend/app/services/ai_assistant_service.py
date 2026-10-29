@@ -41,6 +41,7 @@ from app.schemas.ai import (
     RecommendationItem,
     StructuredAiPayload,
 )
+from app.services.ai_context_service import AiContextService
 from app.utils.dates import utc_iso
 from app.utils.ids import generate_id
 
@@ -329,13 +330,19 @@ class AiAssistantService:
                 models_to_attempt.append(fallback)
 
         system_prompt = (
+            "You are CarbonIQ's sustainability analysis assistant.\n"
             f"{system_instruction}\n\n"
-            "CRITICAL ARCHITECTURAL CONSTRAINTS:\n"
-            "1. ONLY use verified numerical data provided in GROUNDED CONTEXT.\n"
-            "2. Do NOT invent, extrapolate, or alter numbers or emission factors.\n"
-            "3. State data limitations if records are missing.\n"
-            "4. Be concise and direct. Keep direct_answer to 2-3 high-impact sentences. Limit key_findings to max 2 items and recommendations to max 2 actions.\n"
-            "5. Respond ONLY with a valid JSON object matching the requested schema without markdown fences."
+            "EVIDENCE-BASED REASONING CONSTRAINTS:\n"
+            "1. Answer using the supplied CarbonIQ context and user inquiry. Treat supplied calculated emissions, historical aggregates, and valid model predictions as the sole authoritative values.\n"
+            "2. Do NOT invent activity records, emissions, dates, emission factors, predictions, savings, or model accuracy.\n"
+            "3. Do not claim correlation proves causation. Distinguish observed facts from possible explanations and recommendations.\n"
+            "4. When supplied information is insufficient, clearly state what is missing in data_limitations.\n"
+            "5. Do not claim an action will produce a numerical emissions reduction unless available calculations support it.\n"
+            "6. When discussing future emissions, distinguish validated model predictions from illustrative scenarios.\n"
+            "7. When comparing bus routes, use actual optimization results. Do not invent routes, bus capacities, passenger counts, travel distances, or savings.\n"
+            "8. Use historical trends to personalize recommendations where relevant. Explain recommendations in clear, practical language.\n"
+            "9. Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items each.\n"
+            "10. Respond ONLY with a valid JSON object matching the requested schema without markdown fences."
         )
 
         # Minified JSON context to save prompt token bandwidth and processing time
@@ -467,25 +474,12 @@ class AiAssistantService:
         timestamp = utc_iso()
         chat_id = generate_id("ai_elec")
 
-        # Selective field projection avoids retrieving unnecessary document fields
-        t_db_start = time.perf_counter()
-        projection = {
-            "reporting_month": 1,
-            "consumption_kwh": 1,
-            "calculated_emissions_kg": 1,
-            "bill_amount_inr": 1,
-            "source": 1,
-            "building_or_department": 1,
-            "_id": 0,
-        }
-        cursor = db.electricity_records.find(
-            {"workspace_id": workspace_id},
-            projection=projection,
-        ).sort("reporting_month", 1)
-        records = [r async for r in cursor]
-        t_db = (time.perf_counter() - t_db_start) * 1000
+        # 1. Build comprehensive, historical & current context via AiContextService
+        t_ctx_start = time.perf_counter()
+        context = await AiContextService.build_electricity_context(workspace_id, db, sanitized_q)
+        t_ctx = (time.perf_counter() - t_ctx_start) * 1000
 
-        if not records:
+        if not context.get("has_records"):
             empty_msg = "No electricity consumption records found in your workspace yet. Please log monthly meter readings to enable personalized AI energy analysis."
             return AiChatResponse(
                 id=chat_id,
@@ -494,129 +488,67 @@ class AiAssistantService:
                 structured_payload=StructuredAiPayload(
                     intent="direct",
                     direct_answer=empty_msg,
-                    data_limitations=["No electricity records currently logged for this workspace."],
+                    data_limitations=context.get("data_limitations", ["No electricity records currently logged for this workspace."]),
                 ),
             )
 
-        latest = records[-1]
-        previous = records[-2] if len(records) > 1 else None
-
-        total_kwh = sum(r.get("consumption_kwh", 0.0) for r in records)
-        total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in records)
-
-        # Scoped Cache Check
-        fingerprint = f"{len(records)}:{total_kwh:.1f}:{latest.get('reporting_month')}"
+        cur = context["current_period"]
+        total_rec = context["total_records_analyzed"]
+        fingerprint = f"{total_rec}:{cur['consumption_kwh']}:{cur['month']}"
         cache_key = AiCache.make_key(workspace_id, "electricity", sanitized_q, fingerprint)
         cached_resp = AiCache.get(cache_key)
         if cached_resp:
             t_total = (time.perf_counter() - t_start) * 1000
-            logger.info("AI [electricity] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            logger.info("AI [electricity] CACHE HIT: total=%.1fms (ctx=%.1fms)", t_total, t_ctx)
             return cached_resp
 
-        t_calc_start = time.perf_counter()
-        grid_factor = EMISSION_FACTORS["grid_in_cea_baseline"]
-
-        # Department breakdown
-        dept_totals: Dict[str, float] = {}
-        for r in records:
-            dept = r.get("building_or_department") or "Facility"
-            dept_totals[dept] = dept_totals.get(dept, 0.0) + r.get("consumption_kwh", 0.0)
-
-        # Peak consumption record
-        peak = max(records, key=lambda x: x.get("consumption_kwh", 0.0))
-
-        # 15% reduction scenario
-        scenario_15 = calculate_electricity_savings_scenario(latest["consumption_kwh"], 15.0)
-
-        grounded_context = {
-            "module": "electricity",
-            "record_count": len(records),
-            "latest_record": {
-                "month": latest["reporting_month"],
-                "consumption_kwh": latest["consumption_kwh"],
-                "calculated_emissions_kg": latest.get("calculated_emissions_kg", 0.0),
-                "bill_inr": latest.get("bill_amount_inr"),
-                "source": latest.get("source", "Grid"),
-                "department": latest.get("building_or_department", "Facility"),
-            },
-            "previous_record": {
-                "month": previous["reporting_month"],
-                "consumption_kwh": previous["consumption_kwh"],
-                "calculated_emissions_kg": previous.get("calculated_emissions_kg", 0.0),
-            } if previous else None,
-            "peak_record": {
-                "month": peak["reporting_month"],
-                "consumption_kwh": peak["consumption_kwh"],
-                "calculated_emissions_kg": peak.get("calculated_emissions_kg", 0.0),
-                "department": peak.get("building_or_department", "Facility"),
-            },
-            "modeled_15_pct_savings_scenario": {
-                "kwh_reduction": scenario_15.kwh_reduction,
-                "emissions_reduction_kg": scenario_15.emissions_reduction_kg,
-                "cost_savings_inr": scenario_15.cost_savings_inr,
-                "tariff_inr_per_kwh": scenario_15.tariff_inr_per_kwh,
-                "assumptions": scenario_15.assumptions,
-            },
-            "department_breakdown_kwh": dept_totals,
-            "total_consumption_kwh": total_kwh,
-            "total_emissions_kg": total_emissions,
-            "emission_factor": {
-                "id": grid_factor.factor_id,
-                "value": grid_factor.value,
-                "unit": grid_factor.unit,
-                "source": grid_factor.source,
-            },
-        }
-
-        # Deterministic calculation breakdown if requested
+        # 2. Attach verifiable calculation breakdown if applicable
         calculation_breakdown = None
         match_pct = re.search(r"(\d+)%", q)
-        if "save" in q or "reduc" in q or match_pct:
-            pct = float(match_pct.group(1)) if match_pct else 15.0
-            sc = calculate_electricity_savings_scenario(latest["consumption_kwh"], pct)
+        if "save" in q or "reduc" in q or match_pct or "scenario" in q or "cost" in q:
+            sc = context["modeled_savings_scenario"]
             calculation_breakdown = CalculationBreakdown(
-                formula="Potential Reduction = Current kWh × (Reduction % ÷ 100)",
+                formula="Potential Reduction = Current kWh × (Target Reduction % ÷ 100)",
                 inputs={
-                    "Current consumption": f"{latest['consumption_kwh']:,} kWh",
-                    "Target reduction": f"{pct:.0f}%",
-                    "Estimated variable tariff": f"₹{sc.tariff_inr_per_kwh}/kWh",
-                    "Grid emission factor": f"{grid_factor.value} {grid_factor.unit}",
+                    "Baseline consumption": f"{cur['consumption_kwh']:,} kWh ({cur['month']})",
+                    "Target reduction": f"{sc['target_reduction_percent']:.0f}%",
+                    "Assumed variable tariff": f"₹{sc['assumed_tariff_inr_per_kwh']}/kWh",
+                    "Grid emission factor": f"{context['authoritative_emission_factor']['value']} {context['authoritative_emission_factor']['unit']}",
                 },
-                assumptions=sc.assumptions,
-                result=f"₹{sc.cost_savings_inr:,.0f}/month estimated savings ({sc.kwh_reduction} kWh / {sc.emissions_reduction_kg} kg CO2e)",
+                assumptions=sc["assumptions"],
+                result=f"₹{sc['estimated_monthly_savings_inr']:,.0f}/month estimated savings ({sc['kwh_reduction']:,} kWh / {sc['emissions_reduction_kg']:,.1f} kg CO2e)",
             )
         elif any(w in q for w in ["highest", "peak", "maximum"]):
+            peak = context["historical_statistics"]["peak_month"]
             calculation_breakdown = CalculationBreakdown(
-                formula="Peak Month = max(consumption_kwh across records)",
+                formula="Peak Month = max(monthly_consumption_kwh)",
                 inputs={
-                    "Peak period": peak["reporting_month"],
+                    "Peak period": peak["month"],
                     "Consumption": f"{peak['consumption_kwh']:,} kWh",
-                    "Calculated emissions": f"{peak.get('calculated_emissions_kg', 0):,} kg CO2e",
+                    "Emissions": f"{peak['emissions_kg']:,} kg CO2e",
                 },
-                result=f"Peak observed in {peak['reporting_month']} across {len(records)} periods",
+                result=f"Peak observed in {peak['month']} ({peak['consumption_kwh']:,} kWh)",
             )
-        elif ("compare" in q or "previous" in q) and previous:
-            diff_kwh = round(latest["consumption_kwh"] - previous["consumption_kwh"], 1)
-            pct_change = round((diff_kwh / previous["consumption_kwh"]) * 100, 1) if previous["consumption_kwh"] > 0 else 0
-            direction = "increased" if diff_kwh > 0 else "decreased" if diff_kwh < 0 else "stayed constant"
+        elif ("compare" in q or "previous" in q or "mom" in q or "change" in q or "trend" in q) and context.get("previous_period_comparison"):
+            comp = context["previous_period_comparison"]
             calculation_breakdown = CalculationBreakdown(
-                formula="Change = Latest Month kWh - Previous Month kWh",
+                formula="Change = Current Month kWh - Previous Month kWh",
                 inputs={
-                    f"Latest ({latest['reporting_month']})": f"{latest['consumption_kwh']} kWh",
-                    f"Previous ({previous['reporting_month']})": f"{previous['consumption_kwh']} kWh",
+                    f"Current ({cur['month']})": f"{comp['current_value']:,} kWh",
+                    "Previous month": f"{comp['previous_value']:,} kWh",
                 },
-                result=f"{direction.capitalize()} by {abs(diff_kwh)} kWh ({pct_change:+0.1f}%)",
+                result=comp["formatted_change"],
             )
-        t_calc = (time.perf_counter() - t_calc_start) * 1000
 
         elec_instruction = (
             "You are CarbonIQ's Senior Energy & Decarbonization Analyst.\n"
-            "ROLE: Provide grounded analysis of workspace electricity (kWh), CEA emissions (kg CO2e), tariff costs (INR), and efficiency actions.\n"
+            "ROLE: Provide grounded analysis of workspace electricity consumption (kWh), CEA baseline emissions (kg CO2e), "
+            "tariffs (INR), and efficiency actions. Ground answers in current and historical monthly context.\n"
             "USER INTENT & EVIDENCE RULES:\n"
             "- Determine user intent: 'direct', 'comparative', 'recommendation', or 'analytical'.\n"
-            "- If user asks a factual question, answer directly in 'direct_answer' with verified metrics in 'metrics'. Keep it concise without filler.\n"
-            "- If user asks for savings, cite realistic operational actions (HVAC scheduling, cooling set points, solar PV).\n"
-            "- If records are limited, state limitations in 'data_limitations'.\n\n"
+            "- Cite verified metrics from context in 'direct_answer' and 'metrics'. Keep it concise without generic filler.\n"
+            "- Use historical trends to personalize operational recommendations (HVAC scheduling, cooling set points, solar PV).\n"
+            "- If historical records are limited, state limitations in 'data_limitations'.\n\n"
             "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
             "{\n"
             '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
@@ -639,7 +571,7 @@ class AiAssistantService:
         llm_reply = await cls._call_llm(
             system_instruction=elec_instruction,
             user_query=sanitized_q,
-            grounded_context=grounded_context,
+            grounded_context=context,
             max_tokens=450,
         )
         t_llm = (time.perf_counter() - t_llm_start) * 1000
@@ -648,14 +580,14 @@ class AiAssistantService:
         structured_payload = parse_structured_ai_reply(
             llm_reply,
             default_intent="direct",
-            default_answer=f"Latest electricity consumption was {latest['consumption_kwh']:,} kWh ({latest.get('calculated_emissions_kg', 0):,.1f} kg CO2e) for {latest['reporting_month']}.",
+            default_answer=f"Latest electricity consumption was {cur['consumption_kwh']:,} kWh ({cur['calculated_emissions_kg']:,.1f} kg CO2e) for {cur['month']}.",
         )
         t_parse = (time.perf_counter() - t_parse_start) * 1000
 
         t_total = (time.perf_counter() - t_start) * 1000
         logger.info(
-            "AI [electricity] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
-            t_total, t_db, t_calc, t_llm, t_parse
+            "AI [electricity] perf: total=%.1fms (ctx=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_ctx, t_llm, t_parse
         )
 
         response = AiChatResponse(
@@ -666,8 +598,7 @@ class AiAssistantService:
             structured_payload=structured_payload,
             meta={
                 "timing_ms": {
-                    "db": round(t_db, 1),
-                    "calc": round(t_calc, 1),
+                    "context": round(t_ctx, 1),
                     "llm": round(t_llm, 1),
                     "parse": round(t_parse, 1),
                     "total": round(t_total, 1),
@@ -695,35 +626,12 @@ class AiAssistantService:
         timestamp = utc_iso()
         chat_id = generate_id("ai_trans")
 
-        # Concurrently fetch bus routes and transportation records with lean projections
-        t_db_start = time.perf_counter()
-        routes_proj = {
-            "route_name": 1,
-            "distance_km": 1,
-            "assigned_students": 1,
-            "seating_capacity": 1,
-            "destination": 1,
-            "trips_per_day": 1,
-            "fuel_efficiency_km_per_l": 1,
-            "_id": 0,
-        }
-        trans_proj = {
-            "distance_km": 1,
-            "calculated_emissions_kg": 1,
-            "date": 1,
-            "_id": 0,
-        }
+        # 1. Build comprehensive, historical & fleet context via AiContextService
+        t_ctx_start = time.perf_counter()
+        context = await AiContextService.build_transportation_context(workspace_id, db, sanitized_q)
+        t_ctx = (time.perf_counter() - t_ctx_start) * 1000
 
-        async def _fetch_routes():
-            return [r async for r in db.bus_routes.find({"workspace_id": workspace_id}, projection=routes_proj)]
-
-        async def _fetch_trans():
-            return [t async for t in db.transportation_records.find({"workspace_id": workspace_id}, projection=trans_proj)]
-
-        routes, trans_records = await asyncio.gather(_fetch_routes(), _fetch_trans())
-        t_db = (time.perf_counter() - t_db_start) * 1000
-
-        if not routes and not trans_records:
+        if not context.get("has_records"):
             empty_msg = "No transportation records or fleet routes found in your workspace yet. Please configure bus corridors or log trip mileage to enable mobility analysis."
             return AiChatResponse(
                 id=chat_id,
@@ -732,94 +640,63 @@ class AiAssistantService:
                 structured_payload=StructuredAiPayload(
                     intent="direct",
                     direct_answer=empty_msg,
-                    data_limitations=["No transportation records or bus routes currently configured for this workspace."],
+                    data_limitations=context.get("data_limitations", ["No transportation records or bus routes currently configured for this workspace."]),
                 ),
             )
 
-        total_dist = sum(r.get("distance_km", 0.0) for r in trans_records)
-        total_emissions = sum(r.get("calculated_emissions_kg", 0.0) for r in trans_records)
-
-        # Scoped Cache Check
-        fingerprint = f"{len(routes)}:{len(trans_records)}:{total_dist:.1f}:{total_emissions:.1f}"
+        cur = context["current_period"]
+        fingerprint = f"{context['total_fleet_records']}:{context['total_routes_configured']}:{cur['distance_km']}:{cur['calculated_emissions_kg']}"
         cache_key = AiCache.make_key(workspace_id, "transportation", sanitized_q, fingerprint)
         cached_resp = AiCache.get(cache_key)
         if cached_resp:
             t_total = (time.perf_counter() - t_start) * 1000
-            logger.info("AI [transportation] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            logger.info("AI [transportation] CACHE HIT: total=%.1fms (ctx=%.1fms)", t_total, t_ctx)
             return cached_resp
 
-        t_calc_start = time.perf_counter()
-        # Evaluate route optimization
-        proposals = optimize_bus_routes(routes) if routes else []
-
-        # Identify low occupancy routes
-        low_occupancy = [
-            r for r in routes
-            if r.get("seating_capacity", 40) > 0 and (r.get("assigned_students", 0) / r.get("seating_capacity", 40)) < 0.6
-        ]
-
-        # Identify peak fuel route
-        peak_route = None
-        if routes:
-            peak_route = max(
-                routes,
-                key=lambda x: (x.get("distance_km", 0) * x.get("trips_per_day", 2)) / max(1.0, x.get("fuel_efficiency_km_per_l", 4.5)),
-            )
-
-        grounded_trans_context = {
-            "module": "transportation",
-            "routes_count": len(routes),
-            "fleet_records_count": len(trans_records),
-            "total_distance_km": total_dist,
-            "total_emissions_kg": total_emissions,
-            "optimization_proposals_count": len(proposals),
-            "low_occupancy_routes_count": len(low_occupancy),
-            "routes_sample": [
-                {
-                    "route_name": r.get("route_name"),
-                    "distance_km": r.get("distance_km"),
-                    "assigned_students": r.get("assigned_students"),
-                    "seating_capacity": r.get("seating_capacity"),
-                    "destination": r.get("destination"),
-                }
-                for r in routes[:6]
-            ],
-        }
-
+        # 2. Attach verifiable calculation breakdown if applicable
         calculation_breakdown = None
-        if ("combin" in q or "optimiz" in q or "overlap" in q) and proposals:
-            p = proposals[0]
+        if ("combin" in q or "optimiz" in q or "overlap" in q or "consolidat" in q) and context.get("route_optimization_proposal"):
+            p = context["route_optimization_proposal"]
             calculation_breakdown = CalculationBreakdown(
                 formula="Fuel Reduction = (Current Distance - Combined Distance) ÷ Fleet km/L × Days/Month",
                 inputs={
-                    "Current total distance": f"{p.current_config.total_distance_km} km",
-                    "Proposed consolidated distance": f"{p.proposed_config.total_distance_km} km",
-                    "Distance reduction": f"{p.estimated_distance_reduction_km} km/day",
+                    "Corridor opportunity": p["title"],
+                    "Distance reduction": f"{p['distance_reduction_km_per_day']} km/day",
+                    "Feasibility": p["feasibility"],
                 },
-                assumptions=p.assumptions,
-                result=f"Save ~{p.estimated_fuel_savings_liters} L fuel/month (₹{p.estimated_monthly_savings_inr:,})",
+                result=f"Save ~{p['estimated_monthly_fuel_savings_liters']} L fuel/month (₹{p['estimated_monthly_cost_savings_inr']:,})",
             )
-        elif peak_route and "fuel" in q and ("most" in q or "highest" in q or "peak" in q):
-            daily_fuel = round((peak_route.get("distance_km", 0) * peak_route.get("trips_per_day", 2)) / max(1.0, peak_route.get("fuel_efficiency_km_per_l", 4.5)), 1)
+        elif "fuel" in q and ("most" in q or "highest" in q or "peak" in q) and context["bus_fleet_metrics"].get("peak_fuel_route"):
+            pk = context["bus_fleet_metrics"]["peak_fuel_route"]
             calculation_breakdown = CalculationBreakdown(
                 formula="Daily Fuel = (Distance × Trips) ÷ Fuel Efficiency",
                 inputs={
-                    "Route": peak_route.get("route_name", ""),
-                    "Distance": f"{peak_route.get('distance_km')} km",
-                    "Fuel Efficiency": f"{peak_route.get('fuel_efficiency_km_per_l')} km/L",
+                    "Route": pk["route_name"],
+                    "Distance": f"{pk['distance_km']} km",
+                    "Fuel Efficiency": f"{pk['fuel_efficiency_km_per_l']} km/L",
                 },
-                result=f"{daily_fuel} L/day",
+                result=f"{pk['daily_fuel_liters']} L/day",
             )
-        t_calc = (time.perf_counter() - t_calc_start) * 1000
+        elif ("compare" in q or "previous" in q or "mom" in q or "change" in q or "trend" in q) and context.get("previous_period_comparison"):
+            comp = context["previous_period_comparison"]
+            calculation_breakdown = CalculationBreakdown(
+                formula="Change = Current Month Emissions - Previous Month Emissions",
+                inputs={
+                    f"Current ({cur['month']})": f"{comp['current_value']} kg CO2e",
+                    "Previous month": f"{comp['previous_value']} kg CO2e",
+                },
+                result=comp["formatted_change"],
+            )
 
         trans_instruction = (
             "You are CarbonIQ's Fleet & Mobility Sustainability Advisor.\n"
-            "ROLE: Provide grounded insights on bus routes, trip distances, student occupancy, diesel consumption, and Scope 1 tailpipe emissions.\n"
+            "ROLE: Provide grounded insights on bus routes, trip distances, student occupancy, diesel consumption, and Scope 1 emissions. "
+            "Use historical monthly trends and fleet route metrics to guide recommendations.\n"
             "USER INTENT & EVIDENCE RULES:\n"
             "- Determine user intent: 'direct', 'comparative', 'recommendation', or 'analytical'.\n"
-            "- Use ONLY active bus routes, trip distances, and fleet records in GROUNDED CONTEXT.\n"
-            "- If user asks which route consumes the most fuel, name the route and cite its distance, trips, and L/day directly in 'direct_answer'.\n"
-            "- Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items.\n\n"
+            "- If user asks which route consumes the most fuel, cite its distance, trips, and L/day directly in 'direct_answer'.\n"
+            "- Use historical trends to personalize corridor consolidation or deadhead reduction.\n"
+            "- If records are limited, state limitations in 'data_limitations'.\n\n"
             "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
             "{\n"
             '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
@@ -842,7 +719,7 @@ class AiAssistantService:
         llm_reply = await cls._call_llm(
             system_instruction=trans_instruction,
             user_query=sanitized_q,
-            grounded_context=grounded_trans_context,
+            grounded_context=context,
             max_tokens=450,
         )
         t_llm = (time.perf_counter() - t_llm_start) * 1000
@@ -857,8 +734,8 @@ class AiAssistantService:
 
         t_total = (time.perf_counter() - t_start) * 1000
         logger.info(
-            "AI [transportation] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
-            t_total, t_db, t_calc, t_llm, t_parse
+            "AI [transportation] perf: total=%.1fms (ctx=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_ctx, t_llm, t_parse
         )
 
         response = AiChatResponse(
@@ -869,8 +746,7 @@ class AiAssistantService:
             structured_payload=structured_payload,
             meta={
                 "timing_ms": {
-                    "db": round(t_db, 1),
-                    "calc": round(t_calc, 1),
+                    "context": round(t_ctx, 1),
                     "llm": round(t_llm, 1),
                     "parse": round(t_parse, 1),
                     "total": round(t_total, 1),
@@ -898,20 +774,12 @@ class AiAssistantService:
         timestamp = utc_iso()
         chat_id = generate_id("ai_waste")
 
-        t_db_start = time.perf_counter()
-        waste_proj = {
-            "quantity_kg": 1,
-            "treatment_method": 1,
-            "category": 1,
-            "date": 1,
-            "calculated_emissions_kg": 1,
-            "_id": 0,
-        }
-        cursor = db.waste_records.find({"workspace_id": workspace_id}, projection=waste_proj)
-        records = [r async for r in cursor]
-        t_db = (time.perf_counter() - t_db_start) * 1000
+        # 1. Build comprehensive, historical & circularity context via AiContextService
+        t_ctx_start = time.perf_counter()
+        context = await AiContextService.build_waste_context(workspace_id, db, sanitized_q)
+        t_ctx = (time.perf_counter() - t_ctx_start) * 1000
 
-        if not records:
+        if not context.get("has_records"):
             empty_msg = "No waste stream records found in your workspace yet. Please log waste generation categories and treatment methods to enable circularity analysis."
             return AiChatResponse(
                 id=chat_id,
@@ -920,69 +788,57 @@ class AiAssistantService:
                 structured_payload=StructuredAiPayload(
                     intent="direct",
                     direct_answer=empty_msg,
-                    data_limitations=["No waste records currently logged for this workspace."],
+                    data_limitations=context.get("data_limitations", ["No waste records currently logged for this workspace."]),
                 ),
             )
 
-        total_kg = sum(r.get("quantity_kg", 0.0) for r in records)
-        recycled_kg = sum(
-            r.get("quantity_kg", 0.0)
-            for r in records
-            if (r.get("treatment_method") or "").lower() == "recycling" or (r.get("category") or "").lower() == "recyclable"
-        )
-        rate = calculate_recycling_rate(recycled_kg, total_kg)
-
-        # Scoped Cache Check
-        fingerprint = f"{len(records)}:{total_kg:.1f}:{recycled_kg:.1f}"
+        cur = context["current_period"]
+        fingerprint = f"{context['total_records_analyzed']}:{cur['total_waste_kg']}:{cur['recycling_rate_percent']}"
         cache_key = AiCache.make_key(workspace_id, "waste", sanitized_q, fingerprint)
         cached_resp = AiCache.get(cache_key)
         if cached_resp:
             t_total = (time.perf_counter() - t_start) * 1000
-            logger.info("AI [waste] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            logger.info("AI [waste] CACHE HIT: total=%.1fms (ctx=%.1fms)", t_total, t_ctx)
             return cached_resp
 
-        t_calc_start = time.perf_counter()
-        cat_totals: Dict[str, float] = {}
-        for r in records:
-            c = r.get("category") or "General"
-            cat_totals[c] = cat_totals.get(c, 0.0) + r.get("quantity_kg", 0.0)
-
-        grounded_waste_context = {
-            "module": "waste",
-            "records_count": len(records),
-            "total_waste_kg": total_kg,
-            "recycled_kg": recycled_kg,
-            "recycling_rate_percent": round(rate or 0, 1),
-            "categories": cat_totals,
-        }
-
+        # 2. Attach verifiable calculation breakdown if applicable
         calculation_breakdown = None
-        if "recycl" in q:
+        if "recycl" in q or "diversion" in q or "rate" in q or "recovery" in q:
             calculation_breakdown = CalculationBreakdown(
                 formula="Recycling Rate = (Recycled kg ÷ Total kg) × 100",
                 inputs={
-                    "Recycled waste": f"{recycled_kg:,.0f} kg",
-                    "Total waste generated": f"{total_kg:,.0f} kg",
+                    "Recycled waste": f"{cur['recycled_kg']:,.1f} kg",
+                    "Total waste generated": f"{cur['total_waste_kg']:,.1f} kg",
                 },
-                result=f"{rate or 0:.1f}% recovery rate",
+                result=f"{cur['recycling_rate_percent']:.1f}% recovery rate ({cur['month']})",
             )
-        elif cat_totals and ("category" in q or "contribute" in q or "most" in q):
-            top_cat, top_qty = max(cat_totals.items(), key=lambda x: x[1])
+        elif ("category" in q or "contribute" in q or "stream" in q) and context.get("category_breakdown"):
+            top = context["category_breakdown"][0]
             calculation_breakdown = CalculationBreakdown(
-                formula="Category % = (Category kg ÷ Total kg) × 100",
-                inputs={c: f"{k:,.0f} kg" for c, k in cat_totals.items()},
-                result=f"{top_cat} ({top_qty:,.0f} kg)",
+                formula="Category Share = (Category kg ÷ Total kg) × 100",
+                inputs={c["category"]: f"{c['quantity_kg']:,.0f} kg ({c['percentage_share']}%)" for c in context["category_breakdown"][:4]},
+                result=f"Largest stream is {top['category']} at {top['percentage_share']}% ({top['quantity_kg']:,} kg)",
             )
-        t_calc = (time.perf_counter() - t_calc_start) * 1000
+        elif ("compare" in q or "previous" in q or "mom" in q or "change" in q or "trend" in q) and context.get("previous_period_comparison"):
+            comp = context["previous_period_comparison"]
+            calculation_breakdown = CalculationBreakdown(
+                formula="Change = Current Diversion Rate - Previous Diversion Rate",
+                inputs={
+                    "Current diversion rate": f"{comp['current_value']}%",
+                    "Previous diversion rate": f"{comp['previous_value']}%",
+                },
+                result=comp["formatted_change"],
+            )
 
         waste_instruction = (
             "You are CarbonIQ's Circular Economy & Waste Diversion Advisor.\n"
-            "ROLE: Provide grounded analysis of waste stream weights (kg), recovery/recycling diversion rates (%), and IPCC avoidance factors.\n"
+            "ROLE: Provide grounded analysis of waste stream weights (kg), recovery/recycling diversion rates (%), and IPCC avoidance factors. "
+            "STRICT CONVENTION: Negative emissions represent avoided landfill methane credits under IPCC circular accounting, NOT direct carbon removal.\n"
             "USER INTENT & EVIDENCE RULES:\n"
             "- Determine user intent: 'direct', 'comparative', 'recommendation', or 'analytical'.\n"
-            "- Distinguish landfill emissions from negative circular diversion credits (avoided methane).\n"
-            "- Never describe negative emissions as verified carbon removal (it is an avoided emission credit).\n"
-            "- Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items.\n\n"
+            "- If user asks about the recycling rate, cite the exact rate and total kg directly in 'direct_answer'.\n"
+            "- Use historical recycling trends to guide material segregation and composting steps.\n"
+            "- If records are limited, state limitations in 'data_limitations'.\n\n"
             "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
             "{\n"
             '  "intent": "direct" | "comparative" | "recommendation" | "analytical",\n'
@@ -1005,7 +861,7 @@ class AiAssistantService:
         llm_reply = await cls._call_llm(
             system_instruction=waste_instruction,
             user_query=sanitized_q,
-            grounded_context=grounded_waste_context,
+            grounded_context=context,
             max_tokens=450,
         )
         t_llm = (time.perf_counter() - t_llm_start) * 1000
@@ -1014,14 +870,14 @@ class AiAssistantService:
         structured_payload = parse_structured_ai_reply(
             llm_reply,
             default_intent="direct",
-            default_answer=f"Recorded waste total is {total_kg:,.0f} kg with a {rate or 0:.1f}% recycling recovery rate.",
+            default_answer=f"Recorded waste total is {cur['total_waste_kg']:,.0f} kg with a {cur['recycling_rate_percent']:.1f}% recycling recovery rate for {cur['month']}.",
         )
         t_parse = (time.perf_counter() - t_parse_start) * 1000
 
         t_total = (time.perf_counter() - t_start) * 1000
         logger.info(
-            "AI [waste] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
-            t_total, t_db, t_calc, t_llm, t_parse
+            "AI [waste] perf: total=%.1fms (ctx=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_ctx, t_llm, t_parse
         )
 
         response = AiChatResponse(
@@ -1032,8 +888,7 @@ class AiAssistantService:
             structured_payload=structured_payload,
             meta={
                 "timing_ms": {
-                    "db": round(t_db, 1),
-                    "calc": round(t_calc, 1),
+                    "context": round(t_ctx, 1),
                     "llm": round(t_llm, 1),
                     "parse": round(t_parse, 1),
                     "total": round(t_total, 1),
@@ -1060,36 +915,12 @@ class AiAssistantService:
         timestamp = utc_iso()
         chat_id = generate_id("ai_ins")
 
-        # 1. Gather cross-category records concurrently using lean field projections
-        t_db_start = time.perf_counter()
-        elec_proj = {"calculated_emissions_kg": 1, "reporting_month": 1, "_id": 0}
-        trans_proj = {"calculated_emissions_kg": 1, "date": 1, "_id": 0}
-        waste_proj = {"calculated_emissions_kg": 1, "date": 1, "_id": 0}
+        # 1. Build comprehensive multi-scope context via centralized AiContextService
+        t_ctx_start = time.perf_counter()
+        context = await AiContextService.build_insights_context(workspace_id, db, sanitized_q)
+        t_ctx = (time.perf_counter() - t_ctx_start) * 1000
 
-        async def _get_elec():
-            return [r async for r in db.electricity_records.find({"workspace_id": workspace_id}, projection=elec_proj)]
-
-        async def _get_trans():
-            return [r async for r in db.transportation_records.find({"workspace_id": workspace_id}, projection=trans_proj)]
-
-        async def _get_waste():
-            return [r async for r in db.waste_records.find({"workspace_id": workspace_id}, projection=waste_proj)]
-
-        async def _get_routes_count():
-            try:
-                return await db.bus_routes.count_documents({"workspace_id": workspace_id})
-            except Exception:
-                return 0
-
-        elec_records, trans_records, waste_records, bus_routes_count = await asyncio.gather(
-            _get_elec(),
-            _get_trans(),
-            _get_waste(),
-            _get_routes_count(),
-        )
-        t_db = (time.perf_counter() - t_db_start) * 1000
-
-        if not elec_records and not trans_records and not waste_records:
+        if not context.get("has_records"):
             empty_msg = "No emissions records found across Electricity, Transportation, or Waste in your workspace yet. Please add activity records to enable cross-category portfolio insights."
             return AiChatResponse(
                 id=chat_id,
@@ -1099,156 +930,75 @@ class AiAssistantService:
                 structured_payload=StructuredAiPayload(
                     intent="direct",
                     direct_answer=empty_msg,
-                    data_limitations=["No activity records logged across any emission scopes in this workspace."],
+                    data_limitations=context.get("data_limitations", ["No activity records logged across any emission scopes in this workspace."]),
                 ),
             )
 
-        # 2. Strict deterministic calculations (Python as authoritative single source of truth)
-        t_calc_start = time.perf_counter()
-        elec_emissions = round(sum(r.get("calculated_emissions_kg", 0.0) for r in elec_records), 1)
-        trans_emissions = round(sum(r.get("calculated_emissions_kg", 0.0) for r in trans_records), 1)
-        waste_emissions = round(sum(r.get("calculated_emissions_kg", 0.0) for r in waste_records), 1)
-
-        total_net_emissions = round(elec_emissions + trans_emissions + waste_emissions, 1)
-
-        # Scoped Cache Check
-        fingerprint = f"{len(elec_records)}:{len(trans_records)}:{len(waste_records)}:{total_net_emissions:.1f}"
+        port = context["portfolio_totals"]
+        cur = context.get("current_period", {})
+        fingerprint = f"{context['total_records_analyzed']}:{port['total_net_emissions_kg']}:{cur.get('month', '')}"
         cache_key = AiCache.make_key(workspace_id, "insights", sanitized_q, fingerprint)
         cached_resp = AiCache.get(cache_key)
         if cached_resp:
             t_total = (time.perf_counter() - t_start) * 1000
-            logger.info("AI [insights] CACHE HIT: total=%.1fms (db=%.1fms)", t_total, t_db)
+            logger.info("AI [insights] CACHE HIT: total=%.1fms (ctx=%.1fms)", t_total, t_ctx)
             return cached_resp
 
-        # Compute gross positive emissions for explicit denominator calculations
-        positive_categories = []
-        if trans_emissions > 0:
-            positive_categories.append(("Transportation", trans_emissions, len(trans_records)))
-        if elec_emissions > 0:
-            positive_categories.append(("Electricity", elec_emissions, len(elec_records)))
-        if waste_emissions > 0:
-            positive_categories.append(("Waste", waste_emissions, len(waste_records)))
+        # 2. Attach verifiable calculation breakdown based on query focus
+        q_lower = sanitized_q.lower()
+        cats = {c["name"]: c for c in context.get("categories_summary", [])}
+        elec_val = cats.get("Electricity", {}).get("emissions_kg", 0.0)
+        trans_val = cats.get("Transportation", {}).get("emissions_kg", 0.0)
+        waste_val = cats.get("Waste", {}).get("emissions_kg", 0.0)
+        gross_val = port["total_gross_positive_emissions_kg"]
+        net_val = port["total_net_emissions_kg"]
+        largest = port.get("largest_source")
 
-        gross_positive_emissions = round(sum(c[1] for c in positive_categories), 1) if positive_categories else 0.0
+        if ("largest" in q_lower or "major" in q_lower or "highest" in q_lower or "top" in q_lower) and largest:
+            calculation_breakdown = CalculationBreakdown(
+                formula="Largest Contributor Share = (Source Emissions kg ÷ Total Gross Positive kg) × 100",
+                inputs={
+                    f"{largest['category']} emissions": f"{largest['emissions_kg']:,.1f} kg CO2e",
+                    "Total gross positive emissions": f"{gross_val:,.1f} kg CO2e",
+                },
+                result=f"{largest['category']} represents {largest['percentage_of_gross_positive']}% of positive emissions ({largest['emissions_kg']:,.1f} kg CO2e)",
+            )
+        elif ("compare" in q_lower or "previous" in q_lower or "mom" in q_lower or "change" in q_lower or "trend" in q_lower) and context.get("previous_period_comparison"):
+            comp = context["previous_period_comparison"]
+            calculation_breakdown = CalculationBreakdown(
+                formula="MoM Change = Current Period Net - Previous Period Net",
+                inputs={
+                    f"Current net emissions ({cur.get('month')})": f"{comp['current_value']:,.1f} kg CO2e",
+                    "Previous net emissions": f"{comp['previous_value']:,.1f} kg CO2e",
+                },
+                result=comp["formatted_change"],
+            )
+        else:
+            calculation_breakdown = CalculationBreakdown(
+                formula="Net Portfolio Emissions = Electricity (kg) + Transportation (kg) + Waste (kg)",
+                inputs={
+                    "Electricity (Scope 2)": f"{elec_val:,.1f} kg CO2e",
+                    "Transportation (Scope 1)": f"{trans_val:,.1f} kg CO2e",
+                    "Waste (Scope 3 Circular Credit)": f"{waste_val:,.1f} kg CO2e",
+                    "Gross Positive Emissions": f"{gross_val:,.1f} kg CO2e",
+                },
+                assumptions=[
+                    "Electricity factor: CEA CO2 Baseline Database v19 (0.82 kg CO2e/kWh).",
+                    "Negative waste emissions represent circular recovery offsets (composting/recycling avoiding landfill methane under IPCC).",
+                    "Machine learning forecasting: XGBoost model pipeline (R²=0.976, MAE=37.5 kg CO2e).",
+                ],
+                result=f"{net_val:,.1f} kg CO2e Net Portfolio Total",
+            )
 
-        # Determine largest positive emission source
-        largest_source_info = None
-        if positive_categories:
-            sorted_positive = sorted(positive_categories, key=lambda x: x[1], reverse=True)
-            top_name, top_val, top_cnt = sorted_positive[0]
-            pct_gross = round((top_val / gross_positive_emissions) * 100, 1) if gross_positive_emissions > 0 else 0.0
-            pct_net = round((top_val / total_net_emissions) * 100, 1) if total_net_emissions > 0 else None
-            largest_source_info = {
-                "category": top_name,
-                "emissions_kg": top_val,
-                "percentage_of_gross": pct_gross,
-                "percentage_of_net_total": pct_net,
-                "record_count": top_cnt,
-            }
-
-        # Extract reporting period range if dates exist
-        periods = set()
-        for r in elec_records:
-            if r.get("reporting_month"):
-                periods.add(r["reporting_month"])
-        for r in trans_records:
-            if r.get("date"):
-                periods.add(str(r["date"])[:7])
-        for r in waste_records:
-            if r.get("date"):
-                periods.add(str(r["date"])[:7])
-        reporting_period_str = ", ".join(sorted(periods)) if periods else "Current active dataset"
-
-        # Structured categories array with explicit percentages and status
-        categories_data = []
-
-        # Transportation
-        trans_pct_gross = round((trans_emissions / gross_positive_emissions) * 100, 1) if gross_positive_emissions > 0 and trans_emissions > 0 else 0.0
-        trans_pct_net = round((trans_emissions / total_net_emissions) * 100, 1) if total_net_emissions > 0 and trans_emissions > 0 else None
-        categories_data.append({
-            "name": "Transportation",
-            "emissions_kg": trans_emissions,
-            "record_count": len(trans_records),
-            "percentage_of_gross": trans_pct_gross,
-            "percentage_of_net": trans_pct_net,
-            "status": "positive",
-            "note": "Fleet trips, commuter runs, and transit fuel consumption.",
-        })
-
-        # Electricity
-        elec_pct_gross = round((elec_emissions / gross_positive_emissions) * 100, 1) if gross_positive_emissions > 0 and elec_emissions > 0 else 0.0
-        elec_pct_net = round((elec_emissions / total_net_emissions) * 100, 1) if total_net_emissions > 0 and elec_emissions > 0 else None
-        categories_data.append({
-            "name": "Electricity",
-            "emissions_kg": elec_emissions,
-            "record_count": len(elec_records),
-            "percentage_of_gross": elec_pct_gross,
-            "percentage_of_net": elec_pct_net,
-            "status": "positive",
-            "note": "Grid electricity purchases calculated via CEA v19 emission baseline.",
-        })
-
-        # Waste
-        waste_status = "negative_credit" if waste_emissions < 0 else "positive" if waste_emissions > 0 else "zero"
-        waste_note = (
-            "Net circular diversion credit: Recycling and composting offset net emissions by avoiding landfill methane generation."
-            if waste_emissions < 0
-            else "Solid waste disposal and landfill decomposition emissions."
-        )
-        categories_data.append({
-            "name": "Waste",
-            "emissions_kg": waste_emissions,
-            "record_count": len(waste_records),
-            "percentage_of_gross": None,
-            "percentage_of_net": round((waste_emissions / total_net_emissions) * 100, 1) if total_net_emissions > 0 else None,
-            "status": waste_status,
-            "note": waste_note,
-        })
-
-        # 3. Grounded context provided to Groq
-        from app.services.ml_prediction_service import MlPredictionService
-        ml_info = MlPredictionService.get_model_info()
-
-        grounded_context = {
-            "total_net_emissions_kg": total_net_emissions,
-            "total_gross_positive_emissions_kg": gross_positive_emissions,
-            "total_records_analyzed": len(elec_records) + len(trans_records) + len(waste_records),
-            "reporting_period": reporting_period_str,
-            "largest_source": largest_source_info,
-            "categories": categories_data,
-            "bus_routes_count": bus_routes_count,
-            "ml_forecasting": {
-                "is_available": ml_info.is_loaded,
-                "algorithm": ml_info.algorithm,
-                "evaluation_metrics": ml_info.evaluation_metrics,
-            },
-        }
-
-        # Calculation breakdown for transparent numerical audit
-        calculation_breakdown = CalculationBreakdown(
-            formula="Net Portfolio Emissions = Electricity (kg) + Transportation (kg) + Waste (kg)",
-            inputs={
-                "Electricity": f"{elec_emissions:,.1f} kg CO2e",
-                "Transportation": f"{trans_emissions:,.1f} kg CO2e",
-                "Waste (Diversion Credit)": f"{waste_emissions:,.1f} kg CO2e",
-                "Gross Positive Emissions": f"{gross_positive_emissions:,.1f} kg CO2e",
-            },
-            assumptions=[
-                "Electricity factor: CEA CO2 Baseline Database v19 (0.82 kg CO2e/kWh).",
-                "Negative waste emissions represent circular recovery offsets (composting/recycling avoiding landfill methane).",
-            ],
-            result=f"{total_net_emissions:,.1f} kg CO2e Net Portfolio Total",
-        )
-        t_calc = (time.perf_counter() - t_calc_start) * 1000
-
-        # 4. Prompt Groq for structured narrative insights in strict JSON
+        # 3. Prompt Groq for structured narrative insights in strict JSON
         system_instruction = (
             "You are CarbonIQ's Principal Enterprise Sustainability Analyst.\n"
-            "ROLE: Provide grounded, cross-category carbon footprint analysis across Electricity, Transportation, and Waste.\n"
+            "ROLE: Provide grounded, multi-scope carbon portfolio synthesis across Electricity, Transportation, and Waste.\n"
             "USER INTENT & EVIDENCE RULES:\n"
-            "- Answer the user's specific inquiry FIRST. If the user asks for the largest emission source, answer directly in 'direct_answer' and cite its exact share and emissions in 'metrics'.\n"
-            "- If user requests an overall summary, provide an executive synthesis in 'direct_answer', category observations in 'key_findings', and prioritized abatement steps in 'recommendations'.\n"
-            "- If user asks about future emissions predictions, explain that CarbonIQ forecasts using an XGBoost pipeline (R²=0.976, MAE=37.5 kg CO2e) without inventing prediction values.\n"
+            "- Answer the user's specific inquiry FIRST in 'direct_answer'. If user asks for the largest contributor, cite it immediately with its exact percentage share.\n"
+            "- When analyzing trends, cite chronological month-over-month percentage changes and historical averages from the context.\n"
+            "- If user asks about future emissions or forecasting, cite the XGBoost model pipeline metrics (R²=0.976, MAE=37.5 kg CO2e) and provided forecast points. If forecasting is unavailable or history < 2 months, state the limitation honestly without fabricating predictions.\n"
+            "- Strictly preserve the convention that negative waste values represent circular avoided landfill methane credits under IPCC guidelines, NOT direct carbon removal.\n"
             "- Keep direct_answer concise (2-3 sentences). Limit key findings and recommendations to max 2 items each.\n\n"
             "OUTPUT SCHEMA (Respond ONLY with valid JSON):\n"
             "{\n"
@@ -1272,7 +1022,7 @@ class AiAssistantService:
         llm_raw_reply = await cls._call_llm(
             system_instruction=system_instruction,
             user_query=f"Generate sustainability analytics report for query: '{sanitized_q}'",
-            grounded_context=grounded_context,
+            grounded_context=context,
             max_tokens=650,
         )
         t_llm = (time.perf_counter() - t_llm_start) * 1000
@@ -1281,7 +1031,7 @@ class AiAssistantService:
         structured_payload = parse_structured_ai_reply(
             llm_raw_reply,
             default_intent="direct",
-            default_answer=f"The portfolio recorded a net carbon footprint of {total_net_emissions:,.1f} kg CO2e across active categories.",
+            default_answer=f"The portfolio recorded a net carbon footprint of {net_val:,.1f} kg CO2e across active categories.",
         )
         t_parse = (time.perf_counter() - t_parse_start) * 1000
 
@@ -1290,21 +1040,22 @@ class AiAssistantService:
             "status": "success",
             "title": "Carbon Footprint & Sustainability Analysis",
             "summary": structured_payload.direct_answer,
-            "reporting_period": reporting_period_str,
-            "total_net_emissions_kg": total_net_emissions,
-            "total_gross_emissions_kg": gross_positive_emissions,
-            "total_records_analyzed": len(elec_records) + len(trans_records) + len(waste_records),
-            "largest_source": largest_source_info,
-            "categories": categories_data,
+            "reporting_period": context.get("reporting_period", "Current active dataset"),
+            "total_net_emissions_kg": net_val,
+            "total_gross_emissions_kg": gross_val,
+            "total_records_analyzed": context["total_records_analyzed"],
+            "largest_source": largest,
+            "categories": context.get("categories_summary", []),
             "key_findings": [kf.model_dump() for kf in structured_payload.key_findings],
             "recommendations": [rec.model_dump() for rec in structured_payload.recommendations],
-            "data_limitations": structured_payload.data_limitations,
+            "data_limitations": structured_payload.data_limitations or context.get("data_limitations", []),
+            "ml_prediction_forecasting": context.get("ml_prediction_forecasting"),
         }
 
         t_total = (time.perf_counter() - t_start) * 1000
         logger.info(
-            "AI [insights] perf: total=%.1fms (db=%.1fms, calc=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
-            t_total, t_db, t_calc, t_llm, t_parse
+            "AI [insights] perf: total=%.1fms (ctx=%.1fms, llm=%.1fms, parse=%.1fms, cached=False)",
+            t_total, t_ctx, t_llm, t_parse
         )
 
         response = AiChatResponse(
@@ -1316,8 +1067,7 @@ class AiAssistantService:
             structured_payload=structured_payload,
             meta={
                 "timing_ms": {
-                    "db": round(t_db, 1),
-                    "calc": round(t_calc, 1),
+                    "context": round(t_ctx, 1),
                     "llm": round(t_llm, 1),
                     "parse": round(t_parse, 1),
                     "total": round(t_total, 1),

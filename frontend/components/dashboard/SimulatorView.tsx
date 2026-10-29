@@ -7,6 +7,7 @@ import { Pill } from '@/components/ui/Pill'
 import { useAuth } from '@/context/auth-context'
 import { calculateSavingsProjection } from '@/lib/calculations'
 import { apiClient } from '@/services/api-client'
+import { authService } from '@/services/auth.service'
 
 interface BackendSimResult {
   module: string
@@ -21,7 +22,8 @@ interface BackendSimResult {
 
 export function SimulatorView() {
   const { session, token } = useAuth()
-  const isAuth = Boolean(session.isAuthenticated && token)
+  const activeToken = token || (typeof window !== 'undefined' ? authService.getToken() : null)
+  const isAuth = Boolean((session.isAuthenticated || Boolean(activeToken)) && activeToken)
 
   const [elec, setElec] = useState(15)
   const [transport, setTransport] = useState(10)
@@ -34,10 +36,18 @@ export function SimulatorView() {
     proposedEmissions: number
     projectedKwhReduction: number
     projectedWasteReduction: number
+    baselineElectricityKwh: number
+    hasElecData: boolean
+    baselineTransportDistanceKm: number
+    hasTransData: boolean
+    baselineWasteKg: number
+    hasWasteData: boolean
+    baselineWasteEmissions: number
+    projectedWasteEmissionsReduction: number
     assumptions: string[]
   } | null>(null)
 
-  // Client-side fallback projection
+  // Client-side fallback projection (for demo/unauthenticated mode)
   const clientFallback = calculateSavingsProjection({
     electricityReduction: elec,
     transportReduction: transport,
@@ -45,29 +55,36 @@ export function SimulatorView() {
   })
 
   const runBackendSimulation = useCallback(async () => {
-    if (!isAuth || !token) return
+    const effectiveToken = activeToken || (typeof window !== 'undefined' ? authService.getToken() : null)
+    if (!effectiveToken) return
+
     try {
       const [elecRes, transRes, wasteRes] = await Promise.allSettled([
         apiClient.post<BackendSimResult>(
           '/simulator/electricity',
           { percent_reduction: elec },
-          { token }
+          { token: effectiveToken }
         ),
         apiClient.post<BackendSimResult>(
           '/simulator/transportation',
           { percent_distance_reduction: transport },
-          { token }
+          { token: effectiveToken }
         ),
         apiClient.post<BackendSimResult>(
           '/simulator/waste',
           { percent_reduction: wasteR },
-          { token }
+          { token: effectiveToken }
         ),
       ])
 
       const elecData = elecRes.status === 'fulfilled' ? elecRes.value : null
       const transData = transRes.status === 'fulfilled' ? transRes.value : null
       const wasteData = wasteRes.status === 'fulfilled' ? wasteRes.value : null
+
+      if (!elecData && !transData && !wasteData) {
+        setBackendSavings(null)
+        return
+      }
 
       const totalSavingsInr =
         (elecData?.estimated_cost_savings_inr || 0) +
@@ -90,8 +107,27 @@ export function SimulatorView() {
           ? Math.round((totalReduction / totalBaselineEmissions) * 100)
           : clientFallback.emissionsImprovementPercent
 
+      const elecBaselineKwh = Number(elecData?.baseline?.consumption_kwh || 0)
+      const hasElecRecords = Boolean(
+        elecData && (elecData.baseline?.has_records === true || elecBaselineKwh > 0)
+      )
+
+      const transBaselineKm = Number(transData?.baseline?.distance_km || 0)
+      const hasTransRecords = Boolean(
+        transData && (transData.baseline?.has_records === true || transBaselineKm > 0)
+      )
+
+      const wasteBaselineKg = Number(wasteData?.baseline?.quantity_kg || 0)
+      const hasWasteRecords = Boolean(
+        wasteData && (wasteData.baseline?.has_records === true || wasteBaselineKg > 0)
+      )
+
       const kwhCut = Number(elecData?.difference?.kwh_reduction || 0)
-      const wasteCut = Number(wasteData?.difference?.waste_kg_reduction || 0)
+      const wasteCut = Number(
+        wasteData?.difference?.quantity_reduction_kg ??
+        wasteData?.difference?.waste_kg_reduction ??
+        0
+      )
 
       const allAssumptions = [
         ...(elecData?.assumptions || []),
@@ -106,12 +142,20 @@ export function SimulatorView() {
         proposedEmissions: Math.round(proposed),
         projectedKwhReduction: kwhCut,
         projectedWasteReduction: wasteCut,
+        baselineElectricityKwh: elecBaselineKwh,
+        hasElecData: hasElecRecords,
+        baselineTransportDistanceKm: transBaselineKm,
+        hasTransData: hasTransRecords,
+        baselineWasteKg: wasteBaselineKg,
+        hasWasteData: hasWasteRecords,
+        baselineWasteEmissions: baselineWaste,
+        projectedWasteEmissionsReduction: diffWaste,
         assumptions: allAssumptions,
       })
     } catch {
       setBackendSavings(null)
     }
-  }, [isAuth, elec, transport, wasteR, clientFallback.emissionsImprovementPercent])
+  }, [activeToken, elec, transport, wasteR, clientFallback.emissionsImprovementPercent])
 
   useEffect(() => {
     if (isAuth) {
@@ -122,45 +166,67 @@ export function SimulatorView() {
     } else {
       setBackendSavings(null)
     }
-  }, [isAuth, elec, transport, wasteR, runBackendSimulation])
+  }, [isAuth, activeToken, elec, transport, wasteR, runBackendSimulation])
 
-  const hasBaselineData = Boolean(backendSavings && backendSavings.currentEmissions > 0)
+  const hasAnyBaselineRecords = Boolean(
+    backendSavings &&
+    (backendSavings.hasElecData ||
+     backendSavings.hasTransData ||
+     backendSavings.hasWasteData ||
+     backendSavings.currentEmissions > 0)
+  )
 
-  const currentEmissionsDisplay = hasBaselineData
+  const currentEmissionsDisplay = hasAnyBaselineRecords
     ? `${backendSavings!.currentEmissions.toLocaleString()} kg CO₂e`
     : isAuth
       ? '0 kg CO₂e (No baseline records logged)'
       : '2,480 kg CO₂e (Demo baseline)'
 
-  const savingsMonthly = hasBaselineData
+  const savingsMonthly = hasAnyBaselineRecords
     ? backendSavings!.savingsMonthly
     : isAuth
       ? 0
       : clientFallback.savingsMonthly
 
-  const emissionsImprovementPercent = hasBaselineData
+  const emissionsImprovementPercent = hasAnyBaselineRecords
     ? backendSavings!.emissionsImprovementPercent
     : isAuth
       ? 0
       : clientFallback.emissionsImprovementPercent
 
-  const proposedEmissions = hasBaselineData
-    ? backendSavings!.proposedEmissions
+  const proposedEmissionsDisplay = hasAnyBaselineRecords
+    ? `${backendSavings!.proposedEmissions.toLocaleString()} kg CO₂e`
     : isAuth
-      ? 0
-      : clientFallback.proposedEmissions
+      ? '0 kg CO₂e'
+      : `${clientFallback.proposedEmissions.toLocaleString()} kg CO₂e`
 
-  const projectedKwhReduction = hasBaselineData
-    ? backendSavings!.projectedKwhReduction
-    : isAuth
-      ? 0
-      : clientFallback.projectedKwhReduction
+  // Dynamically compute projected kWh reduction using the baseline and current slider position
+  const dynamicKwhReduction =
+    backendSavings?.hasElecData && backendSavings.baselineElectricityKwh > 0
+      ? Number(((backendSavings.baselineElectricityKwh * elec) / 100).toFixed(1))
+      : backendSavings?.projectedKwhReduction ?? 0
 
-  const projectedWasteReduction = hasBaselineData
-    ? backendSavings!.projectedWasteReduction
+  const projectedKwhReductionDisplay = hasAnyBaselineRecords
+    ? backendSavings?.hasElecData && backendSavings.baselineElectricityKwh > 0
+      ? `${dynamicKwhReduction.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })} kWh`
+      : 'No electricity records logged'
     : isAuth
-      ? 0
-      : clientFallback.projectedWasteReduction
+      ? 'No electricity records logged'
+      : `${clientFallback.projectedKwhReduction.toLocaleString()} kWh`
+
+  // Dynamically compute projected waste reduction (mass avoided in kg) using the baseline and current slider position
+  const dynamicWasteReduction =
+    backendSavings?.hasWasteData && backendSavings.baselineWasteKg > 0
+      ? Number(((backendSavings.baselineWasteKg * wasteR) / 100).toFixed(1))
+      : backendSavings?.projectedWasteReduction ?? 0
+
+  const projectedWasteReductionDisplay = hasAnyBaselineRecords
+    ? backendSavings?.hasWasteData && backendSavings.baselineWasteKg > 0
+      ? `${dynamicWasteReduction.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 1 })} kg`
+      : 'No waste records logged'
+    : isAuth
+      ? 'No waste records logged'
+      : `${clientFallback.projectedWasteReduction.toLocaleString()} kg`
 
   const sliders = [
     ['Electricity reduction', elec, setElec, 'Lower monthly kWh'],
@@ -170,9 +236,9 @@ export function SimulatorView() {
 
   const summaryRows = [
     ['Current estimated emissions', currentEmissionsDisplay],
-    ['Proposed emissions', `${proposedEmissions.toLocaleString()} kg CO₂e`],
-    ['Projected kWh reduction', `${projectedKwhReduction.toLocaleString()} kWh`],
-    ['Projected waste reduction', `${projectedWasteReduction.toLocaleString()} kg`],
+    ['Proposed emissions', proposedEmissionsDisplay],
+    ['Projected kWh reduction', projectedKwhReductionDisplay],
+    ['Projected waste reduction', projectedWasteReductionDisplay],
   ]
 
   return (
@@ -267,6 +333,14 @@ export function SimulatorView() {
                 </div>
               ))}
             </div>
+            {backendSavings?.hasWasteData && backendSavings.projectedWasteEmissionsReduction > 0 && (
+              <div className="mt-3.5 pt-3 border-t border-[#E8EFE6] flex items-center justify-between text-xs text-[#4E6254]">
+                <span className="font-medium">Waste emissions avoided</span>
+                <span className="font-semibold text-[#20513B] tabular-nums">
+                  {backendSavings.projectedWasteEmissionsReduction.toLocaleString()} kg CO₂e
+                </span>
+              </div>
+            )}
           </Card>
         </div>
       </div>

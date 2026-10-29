@@ -155,22 +155,28 @@ async def get_electricity_summary(
             previous_period_comparison=None,
         )
 
-    total_kwh = sum(r["consumption_kwh"] for r in records)
-    total_bill = sum(r.get("bill_amount_inr") or 0.0 for r in records)
-    total_emissions = sum(r.get("calculated_emissions_kg") or 0.0 for r in records)
+    total_kwh = sum(float(r.get("consumption_kwh") or r.get("kwh") or 0.0) for r in records)
+    total_bill = sum(float(r.get("bill_amount_inr") or r.get("cost_inr") or 0.0) for r in records)
+    total_emissions = sum(float(r.get("calculated_emissions_kg") or r.get("emissions_kg") or 0.0) for r in records)
 
     # Monthly Trends Aggregation
     month_map: Dict[str, Dict[str, float]] = defaultdict(lambda: {"consumption_kwh": 0.0, "bill_amount_inr": 0.0, "emissions": 0.0})
     dept_map: Dict[str, float] = defaultdict(float)
 
     for r in records:
-        m = r["reporting_month"]
-        month_map[m]["consumption_kwh"] += r["consumption_kwh"]
-        month_map[m]["bill_amount_inr"] += r.get("bill_amount_inr") or 0.0
-        month_map[m]["emissions"] += r.get("calculated_emissions_kg") or 0.0
+        raw_m = r.get("reporting_month") or r.get("date") or r.get("period") or r.get("month") or "2026-01"
+        from app.utils.dates import normalize_month
+        m = normalize_month(str(raw_m))
+        kwh = float(r.get("consumption_kwh") or r.get("kwh") or 0.0)
+        bill = float(r.get("bill_amount_inr") or r.get("cost_inr") or 0.0)
+        em = float(r.get("calculated_emissions_kg") or r.get("emissions_kg") or 0.0)
+
+        month_map[m]["consumption_kwh"] += kwh
+        month_map[m]["bill_amount_inr"] += bill
+        month_map[m]["emissions"] += em
 
         dept = r.get("building_or_department") or "Unassigned"
-        dept_map[dept] += r["consumption_kwh"]
+        dept_map[dept] += kwh
 
     monthly_trends = [
         MonthlyElectricityTrend(
