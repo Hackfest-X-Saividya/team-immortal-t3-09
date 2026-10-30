@@ -21,7 +21,7 @@ Instead of simply displaying carbon emission numbers, CarbonIQ aims to help user
 5. [Core Features](#-core-features)
 6. [System Architecture](#-system-architecture)
 7. [Technology Stack](#-technology-stack)
-8. [How CarbonIQ Works](#-how-carb oniQ-works)
+8. [How CarbonIQ Works](#-how-carboniQ-works)
 9. [AI, ML and LLM Integration](#-ai-ml-and-llm-integration)
 10. [Carbon Emission Calculation](#-carbon-emission-calculation)
 11. [Data Management](#-data-management)
